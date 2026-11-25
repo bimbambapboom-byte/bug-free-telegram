@@ -21,6 +21,1040 @@ local function __require(name)
 	return result
 end
 
+__defs["body/body"] = function(require)
+-- body/body.lua
+-- One interface over the two controllers so everything else (camera, claim
+-- harness, later the skeleton) never cares which one is running.
+--   proxy   = Uhhhhhh-style hidden humanoid (real world collision)
+--   virtual = Patchma-style raycast + gravity (no instances, no wall collision)
+
+local Virtual = require("body/virtual")
+local Proxy = require("body/proxy")
+
+local Body = {}
+Body.__index = Body
+
+Body.Modes = { "proxy", "virtual" }
+
+-- deps = { input, camera, fpdh }
+function Body.new(cfg, deps, startCF)
+	local self = setmetatable({}, Body)
+	self.cfg = cfg
+	self.deps = deps
+	self.walkSpeed = cfg.WalkSpeed
+	self.jumpPower = cfg.JumpPower
+	self.hipHeight = cfg.HipHeight
+	self.mode = cfg.Mode
+	self.impl = nil
+	self:_create(self.mode, startCF)
+	return self
+end
+
+function Body:_create(mode, cf)
+	local impl = nil
+	if mode == "proxy" then
+		local ok, result = pcall(Proxy.new, self.cfg, self.deps, cf)
+		if ok then
+			impl = result
+		else
+			warn("[Exire] proxy body failed (" .. tostring(result) .. "), using virtual body")
+			mode = "virtual"
+		end
+	end
+	if not impl then
+		mode = "virtual"
+		impl = Virtual.new(self.cfg, self.deps, cf)
+	end
+	self.mode = mode
+	self.impl = impl
+	impl:SetWalkSpeed(self.walkSpeed)
+	impl:SetJumpPower(self.jumpPower)
+	impl:SetHipHeight(self.hipHeight)
+end
+
+function Body:SetMode(mode)
+	if mode == self.mode then
+		return
+	end
+	local cf = self.impl.CF
+	self.impl:Destroy()
+	self:_create(mode, cf)
+end
+
+function Body:SetWalkSpeed(n)
+	self.walkSpeed = n
+	self.impl:SetWalkSpeed(n)
+end
+
+function Body:SetJumpPower(n)
+	self.jumpPower = n
+	self.impl:SetJumpPower(n)
+end
+
+function Body:SetHipHeight(n)
+	self.hipHeight = n
+	self.impl:SetHipHeight(n)
+end
+
+function Body:Step(dt)
+	self.impl:Step(dt)
+end
+
+function Body:GetPosition()
+	return self.impl.Position
+end
+
+function Body:GetCF()
+	return self.impl.CF
+end
+
+function Body:GetVelocity()
+	return self.impl.Velocity
+end
+
+function Body:GetState()
+	return self.impl.State
+end
+
+function Body:Teleport(cf)
+	self.impl:Teleport(cf)
+end
+
+function Body:Destroy()
+	if self.impl then
+		self.impl:Destroy()
+		self.impl = nil
+	end
+end
+
+return Body
+end
+
+__defs["body/camera"] = function(require)
+-- body/camera.lua
+-- Fully scripted orbit camera (Patchma's approach): CameraType stays Scriptable,
+-- we own yaw / pitch / zoom, and property guards put the camera back if anything
+-- else touches it. Because the camera never depends on the real character, a
+-- respawn can no longer yank it to the spawn point.
+--
+-- Mouse look: hold right mouse button (or shift lock / first person = locked).
+-- Zoom model and the 1.75 shift-lock offset follow Uhhhhhh / Patchma.
+
+local Util = require("core/util")
+
+local UserInputService = game:GetService("UserInputService")
+local Workspace = game:GetService("Workspace")
+
+local CameraRig = {}
+CameraRig.__index = CameraRig
+
+local PITCH_LIMIT = math.rad(80)
+local MOUSE_STEP = math.rad(0.5)
+local CROSS_ICON = "rbxasset://textures/Cursors/CrossMouseIcon.png"
+
+-- cfg = Config.Camera, getPivot() -> Vector3 (root position of the body)
+function CameraRig.new(cfg, maid, input, getPivot)
+	local self = setmetatable({}, CameraRig)
+	self.cfg = cfg
+	self.input = input
+	self.getPivot = getPivot
+	self.Yaw = 0
+	self.Pitch = 0
+	self.Zoom = cfg.InitialZoom
+	self.Shiftlock = false
+	self.FirstPerson = false
+	self.LTM = 0
+	self.enabled = true
+	self._zoom = cfg.InitialZoom
+	self._lastCF = nil
+	self._cam = nil
+	self._camMaid = nil
+
+	local cam = Workspace.CurrentCamera
+	if cam then
+		local rx, ry = cam.CFrame:ToEulerAnglesYXZ()
+		self.Pitch = math.clamp(rx, -PITCH_LIMIT, PITCH_LIMIT)
+		self.Yaw = ry
+		local d = (cam.Focus.Position - cam.CFrame.Position).Magnitude
+		if d >= cfg.MinZoom and d <= cfg.MaxZoom then
+			self.Zoom = d
+			self._zoom = d
+		end
+	end
+
+	self:_hook()
+	maid:Give(Workspace:GetPropertyChangedSignal("CurrentCamera"):Connect(function()
+		self:_hook()
+	end))
+	maid:Give(input.ShiftLock:Connect(function()
+		if self.cfg.ShiftLock then
+			self.Shiftlock = not self.Shiftlock
+		end
+	end))
+	maid:Give(function()
+		self:Destroy()
+	end)
+	return self
+end
+
+-- (re)attach the guards to whatever the current camera is
+function CameraRig:_hook()
+	if self._camMaid then
+		self._camMaid:Clean()
+		self._camMaid = nil
+	end
+	local cam = Workspace.CurrentCamera
+	self._cam = cam
+	if not cam or not self.enabled then
+		return
+	end
+	local m = Util.Maid.new()
+	self._camMaid = m
+	m:Give(cam:GetPropertyChangedSignal("CameraType"):Connect(function()
+		if self.enabled and cam.CameraType ~= Enum.CameraType.Scriptable then
+			cam.CameraType = Enum.CameraType.Scriptable
+		end
+	end))
+	m:Give(cam:GetPropertyChangedSignal("CFrame"):Connect(function()
+		if self.enabled and self._lastCF and cam.CFrame ~= self._lastCF then
+			cam.CFrame = self._lastCF
+		end
+	end))
+	cam.CameraType = Enum.CameraType.Scriptable
+end
+
+-- Bound to RenderStep right after the default camera priority.
+function CameraRig:Update(dt)
+	if not self.enabled then
+		return
+	end
+	local cam = Workspace.CurrentCamera
+	if cam ~= self._cam then
+		self:_hook()
+	end
+	if not cam then
+		return
+	end
+	local cfg = self.cfg
+	local input = self.input
+	local uis = UserInputService
+	input:Update(dt)
+
+	-- mouse behaviour: locked while shift-locked / first person, or while RMB is held
+	local target = Enum.MouseBehavior.Default
+	if self.FirstPerson or self.Shiftlock then
+		if uis.TouchEnabled then
+			target = Enum.MouseBehavior.LockCurrentPosition
+		else
+			target = Enum.MouseBehavior.LockCenter
+		end
+	elseif uis:IsMouseButtonPressed(Enum.UserInputType.MouseButton2) then
+		target = Enum.MouseBehavior.LockCurrentPosition
+	end
+	if uis.MouseBehavior ~= target then
+		uis.MouseBehavior = target
+	end
+	local icon = ""
+	if self.Shiftlock then
+		icon = CROSS_ICON
+	end
+	if uis.MouseIcon ~= icon then
+		uis.MouseIcon = icon
+	end
+
+	if target ~= Enum.MouseBehavior.Default then
+		local d = uis:GetMouseDelta()
+		self.Yaw = self.Yaw - d.X * MOUSE_STEP * cfg.Sensitivity
+		self.Pitch = math.clamp(self.Pitch - d.Y * MOUSE_STEP * cfg.Sensitivity, -PITCH_LIMIT, PITCH_LIMIT)
+	end
+	local cd = input:ConsumeCamDelta()
+	self.Yaw = self.Yaw + cd.X
+	self.Pitch = math.clamp(self.Pitch + cd.Y, -PITCH_LIMIT, PITCH_LIMIT)
+
+	-- zoom (negative = in)
+	local z = input:ConsumeZoom()
+	if z ~= 0 then
+		if z > 0 then
+			self.Zoom = self.Zoom + z * (1 + self.Zoom * 0.5)
+		else
+			self.Zoom = (self.Zoom + z) / (1 - z * 0.5)
+		end
+		self.Zoom = math.clamp(self.Zoom, cfg.MinZoom, cfg.MaxZoom)
+	end
+	self._zoom = self.Zoom + (self._zoom - self.Zoom) * math.exp(-32 * dt)
+	self.FirstPerson = self.Zoom < 0.75
+
+	-- local transparency for hats (fades them out when the camera is inside them)
+	local goal = 0
+	if self.FirstPerson then
+		goal = 1
+	elseif self.Zoom < 1.5 then
+		goal = 0.5
+	end
+	local step = dt * 3
+	local ltm = self.LTM
+	if math.abs(ltm - goal) <= step then
+		ltm = goal
+	elseif ltm < goal then
+		ltm = ltm + step
+	else
+		ltm = ltm - step
+	end
+	self.LTM = ltm
+
+	local pivot = self.getPivot()
+	if not pivot then
+		return
+	end
+	pivot = pivot + Vector3.new(0, 1.5, 0)
+	local rot = CFrame.fromEulerAnglesYXZ(self.Pitch, self.Yaw, 0)
+	if self.Shiftlock and not self.FirstPerson then
+		pivot = pivot + rot.RightVector * cfg.ShiftLockOffset
+	end
+	local pos = pivot
+	if not self.FirstPerson then
+		pos = pivot - rot.LookVector * self._zoom
+	end
+	local cf = CFrame.new(pos) * rot
+	self._lastCF = cf
+	if cam.CameraType ~= Enum.CameraType.Scriptable then
+		cam.CameraType = Enum.CameraType.Scriptable
+	end
+	cam.CFrame = cf
+	cam.Focus = CFrame.new(pivot)
+end
+
+function CameraRig:Destroy()
+	if not self.enabled then
+		return
+	end
+	self.enabled = false
+	if self._camMaid then
+		self._camMaid:Clean()
+		self._camMaid = nil
+	end
+	pcall(function()
+		UserInputService.MouseBehavior = Enum.MouseBehavior.Default
+	end)
+	pcall(function()
+		UserInputService.MouseIcon = ""
+	end)
+	local cam = Workspace.CurrentCamera
+	if cam then
+		pcall(function()
+			cam.CameraType = Enum.CameraType.Custom
+		end)
+	end
+end
+
+return CameraRig
+end
+
+__defs["body/input"] = function(require)
+-- body/input.lua
+-- Keyboard, mouse, gamepad and touch input -> a per-frame snapshot:
+--   Move   Vector3  x = right, z = back (so W gives z = -1), length <= 1
+--   Jump   boolean
+--   Sprint boolean (Left Ctrl)
+-- plus accumulated camera rotation / zoom that the camera rig consumes.
+-- Regions and constants for touch follow the Roblox default layout.
+
+local Util = require("core/util")
+
+local UserInputService = game:GetService("UserInputService")
+local GuiService = game:GetService("GuiService")
+local Workspace = game:GetService("Workspace")
+
+local Input = {}
+Input.__index = Input
+
+local function deadzone(v, dz)
+	local m = math.abs(v)
+	if m <= dz then
+		return 0
+	end
+	local scaled = (m - dz) / (1 - dz)
+	if v < 0 then
+		return -scaled
+	end
+	return scaled
+end
+
+local function regions()
+	local sx, sy = 1280, 720
+	local cam = Workspace.CurrentCamera
+	if cam then
+		sx, sy = cam.ViewportSize.X, cam.ViewportSize.Y
+	end
+	local small = math.min(sx, sy) <= 500
+	local r = {}
+	r.stickMaxX = sx * 0.4
+	r.stickMinY = sy * 0.333
+	r.stickRadius = 60
+	r.jumpMinX = sx - 170
+	r.jumpMinY = sy - 210
+	r.jumpMaxX = r.jumpMinX + 120
+	r.jumpMaxY = r.jumpMinY + 120
+	if small then
+		r.stickRadius = 35
+		r.jumpMinX = sx - 95
+		r.jumpMinY = sy - 90
+		r.jumpMaxX = r.jumpMinX + 70
+		r.jumpMaxY = r.jumpMinY + 70
+	end
+	return r
+end
+
+local function flat(v3)
+	return Vector2.new(v3.X, v3.Y)
+end
+
+-- opts = { isOverGui = function(Vector2) -> boolean }
+function Input.new(maid, opts)
+	local self = setmetatable({}, Input)
+	opts = opts or {}
+	self.isOverGui = opts.isOverGui
+	self.Move = Vector3.zero
+	self.Jump = false
+	self.Sprint = false
+	self.ShiftLock = Util.Signal.new()
+	self.camDelta = Vector2.zero
+	self.zoomDelta = 0
+	self._stick = nil
+	self._stickStart = Vector2.zero
+	self._jumpTouch = nil
+	self._camTouch = nil
+	self._camLast = Vector2.zero
+	self._zoomTouch = nil
+	self._pinch = 0
+
+	local function blocked()
+		return UserInputService:GetFocusedTextBox() ~= nil or GuiService.MenuIsOpen
+	end
+
+	maid:Give(UserInputService.InputBegan:Connect(function(input, gpe)
+		if blocked() then
+			return
+		end
+		if input.UserInputType == Enum.UserInputType.Keyboard then
+			if input.KeyCode == Enum.KeyCode.LeftShift or input.KeyCode == Enum.KeyCode.RightShift then
+				self.ShiftLock:Fire()
+			end
+		end
+	end))
+
+	maid:Give(UserInputService.InputChanged:Connect(function(input, gpe)
+		if gpe then
+			return
+		end
+		if input.UserInputType == Enum.UserInputType.MouseWheel then
+			-- scrolling up (Z = +1) zooms in, which is a negative zoom delta
+			self.zoomDelta = self.zoomDelta - input.Position.Z
+		end
+	end))
+
+	maid:Give(UserInputService.TouchStarted:Connect(function(touch, gpe)
+		if blocked() then
+			return
+		end
+		local p = flat(touch.Position)
+		if self.isOverGui and self.isOverGui(p) then
+			return
+		end
+		local r = regions()
+		if not self._stick and p.X < r.stickMaxX and p.Y > r.stickMinY then
+			self._stick = touch
+			self._stickStart = p
+		elseif not self._jumpTouch and p.X > r.jumpMinX and p.X < r.jumpMaxX and p.Y > r.jumpMinY and p.Y < r.jumpMaxY then
+			self._jumpTouch = touch
+		elseif not self._camTouch then
+			self._camTouch = touch
+			self._camLast = p
+		elseif not self._zoomTouch then
+			self._zoomTouch = touch
+			self._pinch = (self._camTouch.Position - touch.Position).Magnitude
+		end
+	end))
+
+	maid:Give(UserInputService.TouchMoved:Connect(function(touch, gpe)
+		if touch == self._camTouch then
+			local p = flat(touch.Position)
+			local d = p - self._camLast
+			self._camLast = p
+			if not self._zoomTouch then
+				self.camDelta = self.camDelta + Vector2.new(-d.X * math.rad(0.5), -d.Y * math.rad(0.35))
+			end
+		end
+		if self._camTouch and self._zoomTouch and (touch == self._camTouch or touch == self._zoomTouch) then
+			local mag = (self._camTouch.Position - self._zoomTouch.Position).Magnitude
+			self.zoomDelta = self.zoomDelta + (self._pinch - mag) * 0.04
+			self._pinch = mag
+		end
+	end))
+
+	maid:Give(UserInputService.TouchEnded:Connect(function(touch, gpe)
+		if touch == self._stick then
+			self._stick = nil
+		elseif touch == self._jumpTouch then
+			self._jumpTouch = nil
+		elseif touch == self._camTouch then
+			self._camTouch = nil
+			self._zoomTouch = nil
+		elseif touch == self._zoomTouch then
+			self._zoomTouch = nil
+		end
+	end))
+
+	return self
+end
+
+-- Called once per frame (the camera rig does this) before anything reads Move/Jump.
+function Input:Update(dt)
+	local uis = UserInputService
+	local typing = uis:GetFocusedTextBox() ~= nil or GuiService.MenuIsOpen
+	local x, z = 0, 0
+	local jump = false
+	local sprint = false
+
+	if not typing then
+		if uis:IsKeyDown(Enum.KeyCode.W) or uis:IsKeyDown(Enum.KeyCode.Up) then
+			z = z - 1
+		end
+		if uis:IsKeyDown(Enum.KeyCode.S) or uis:IsKeyDown(Enum.KeyCode.Down) then
+			z = z + 1
+		end
+		if uis:IsKeyDown(Enum.KeyCode.A) then
+			x = x - 1
+		end
+		if uis:IsKeyDown(Enum.KeyCode.D) then
+			x = x + 1
+		end
+		if uis:IsKeyDown(Enum.KeyCode.Space) then
+			jump = true
+		end
+		if uis:IsKeyDown(Enum.KeyCode.LeftControl) then
+			sprint = true
+		end
+		local yaw = 0
+		if uis:IsKeyDown(Enum.KeyCode.Left) then
+			yaw = yaw + 1
+		end
+		if uis:IsKeyDown(Enum.KeyCode.Right) then
+			yaw = yaw - 1
+		end
+		if yaw ~= 0 then
+			self.camDelta = self.camDelta + Vector2.new(yaw * math.rad(120) * dt, 0)
+		end
+	end
+
+	if uis.GamepadEnabled then
+		local ok, states = pcall(uis.GetGamepadState, uis, Enum.UserInputType.Gamepad1)
+		if ok and states then
+			for _, obj in ipairs(states) do
+				if obj.KeyCode == Enum.KeyCode.Thumbstick1 then
+					x = x + deadzone(obj.Position.X, 0.2)
+					z = z - deadzone(obj.Position.Y, 0.2)
+				elseif obj.KeyCode == Enum.KeyCode.Thumbstick2 then
+					local px = deadzone(obj.Position.X, 0.15)
+					local py = deadzone(obj.Position.Y, 0.15)
+					self.camDelta = self.camDelta + Vector2.new(-px * math.rad(180) * dt, py * math.rad(120) * dt)
+				end
+			end
+		end
+		if uis:IsGamepadButtonDown(Enum.UserInputType.Gamepad1, Enum.KeyCode.ButtonA) then
+			jump = true
+		end
+	end
+
+	if self._stick then
+		local r = regions()
+		local d = flat(self._stick.Position) - self._stickStart
+		local mag = d.Magnitude / r.stickRadius
+		if mag > 0.05 then
+			local dir = d.Unit * math.min(1, (mag - 0.05) / 0.95)
+			x = x + dir.X
+			z = z + dir.Y
+		end
+	end
+	if self._jumpTouch then
+		jump = true
+	end
+
+	local move = Vector3.new(x, 0, z)
+	if move.Magnitude > 1 then
+		move = move.Unit
+	end
+	self.Move = move
+	self.Jump = jump
+	self.Sprint = sprint
+end
+
+function Input:ConsumeCamDelta()
+	local d = self.camDelta
+	self.camDelta = Vector2.zero
+	return d
+end
+
+function Input:ConsumeZoom()
+	local z = self.zoomDelta
+	self.zoomDelta = 0
+	return z
+end
+
+return Input
+end
+
+__defs["body/proxy"] = function(require)
+-- body/proxy.lua
+-- Uhhhhhh-style physics proxy: a hidden, client-only R6 model with a real
+-- Humanoid. Jumping, falling, landing, slopes, stairs, walls, water, ladders
+-- and seats all come from Roblox's own humanoid simulation. Control follows
+-- Uhhhhhh: Humanoid:Move relative to camera yaw and Humanoid.Jump are written
+-- every PreAnimation, collision is toggled per humanoid state every
+-- PreSimulation (while running only the root part collides), and a "last safe
+-- ground" spot is used to rescue the body from the void.
+
+local Util = require("core/util")
+
+local RunService = game:GetService("RunService")
+local Workspace = game:GetService("Workspace")
+
+local Proxy = {}
+Proxy.__index = Proxy
+
+local HST = Enum.HumanoidStateType
+
+-- states in which only the root part collides (everything else collides fully)
+local LIGHT_STATES = {
+	[HST.Running] = true,
+	[HST.RunningNoPhysics] = true,
+	[HST.Jumping] = true,
+	[HST.Freefall] = true,
+	[HST.Landed] = true,
+	[HST.Climbing] = true,
+	[HST.Swimming] = true,
+}
+
+local ROOT_C = CFrame.new(0, 0, 0, -1, 0, 0, 0, 0, 1, 0, 1, 0)
+local NECK_C0 = CFrame.new(0, 1, 0, -1, 0, 0, 0, 0, 1, 0, 1, 0)
+local NECK_C1 = CFrame.new(0, -0.5, 0, -1, 0, 0, 0, 0, 1, 0, 1, 0)
+local LSH_C0 = CFrame.new(-1, 0.5, 0, 0, 0, -1, 0, 1, 0, 1, 0, 0)
+local LSH_C1 = CFrame.new(0.5, 0.5, 0, 0, 0, -1, 0, 1, 0, 1, 0, 0)
+local RSH_C0 = CFrame.new(1, 0.5, 0, 0, 0, 1, 0, 1, 0, -1, 0, 0)
+local RSH_C1 = CFrame.new(-0.5, 0.5, 0, 0, 0, 1, 0, 1, 0, -1, 0, 0)
+local LHIP_C0 = CFrame.new(-1, -1, 0, 0, 0, -1, 0, 1, 0, 1, 0, 0)
+local LHIP_C1 = CFrame.new(-0.5, 1, 0, 0, 0, -1, 0, 1, 0, 1, 0, 0)
+local RHIP_C0 = CFrame.new(1, -1, 0, 0, 0, 1, 0, 1, 0, -1, 0, 0)
+local RHIP_C1 = CFrame.new(0.5, 1, 0, 0, 0, 1, 0, 1, 0, -1, 0, 0)
+
+local function buildModel(startCF, cfg)
+	local model = Instance.new("Model")
+	model.Name = Util.randomString()
+
+	local function part(name, size, offset)
+		local p = Instance.new("Part")
+		p.Name = name
+		p.Size = size
+		p.Transparency = 1
+		p.CanCollide = false
+		p.CanQuery = false
+		p.CanTouch = false
+		p.CastShadow = false
+		p.TopSurface = Enum.SurfaceType.Smooth
+		p.BottomSurface = Enum.SurfaceType.Smooth
+		p.CFrame = startCF * CFrame.new(offset)
+		p.Parent = model
+		return p
+	end
+
+	local root = part("HumanoidRootPart", Vector3.new(2, 2, 1), Vector3.new(0, 0, 0))
+	local torso = part("Torso", Vector3.new(2, 2, 1), Vector3.new(0, 0, 0))
+	local head = part("Head", Vector3.new(2, 1, 1), Vector3.new(0, 1.5, 0))
+	local lArm = part("Left Arm", Vector3.new(1, 2, 1), Vector3.new(-1.5, 0, 0))
+	local rArm = part("Right Arm", Vector3.new(1, 2, 1), Vector3.new(1.5, 0, 0))
+	local lLeg = part("Left Leg", Vector3.new(1, 2, 1), Vector3.new(-0.5, -2, 0))
+	local rLeg = part("Right Leg", Vector3.new(1, 2, 1), Vector3.new(0.5, -2, 0))
+
+	local function motor(name, p0, p1, c0, c1)
+		local m = Instance.new("Motor6D")
+		m.Name = name
+		m.Part0 = p0
+		m.Part1 = p1
+		m.C0 = c0
+		m.C1 = c1
+		m.Parent = p0
+	end
+	motor("RootJoint", root, torso, ROOT_C, ROOT_C)
+	motor("Neck", torso, head, NECK_C0, NECK_C1)
+	motor("Left Shoulder", torso, lArm, LSH_C0, LSH_C1)
+	motor("Right Shoulder", torso, rArm, RSH_C0, RSH_C1)
+	motor("Left Hip", torso, lLeg, LHIP_C0, LHIP_C1)
+	motor("Right Hip", torso, rLeg, RHIP_C0, RHIP_C1)
+
+	local hum = Instance.new("Humanoid")
+	hum.Name = "Humanoid"
+	hum.RigType = Enum.HumanoidRigType.R6
+	hum.DisplayDistanceType = Enum.HumanoidDisplayDistanceType.None
+	hum.HealthDisplayType = Enum.HumanoidHealthDisplayType.AlwaysOff
+	hum.RequiresNeck = false
+	hum.BreakJointsOnDeath = false
+	hum.UseJumpPower = true
+	hum.AutoRotate = true
+	hum.MaxHealth = 100
+	hum.Health = 100
+	hum.WalkSpeed = cfg.WalkSpeed
+	hum.JumpPower = cfg.JumpPower
+	hum.HipHeight = cfg.HipHeight
+	hum.Parent = model
+
+	model.PrimaryPart = root
+	return model, hum, root, { root, torso, head, lArm, rArm, lLeg, rLeg }
+end
+
+-- deps = { input, camera, fpdh }
+function Proxy.new(cfg, deps, startCF)
+	local self = setmetatable({}, Proxy)
+	self.cfg = cfg
+	self.input = deps.input
+	self.camera = deps.camera
+	self.fpdh = deps.fpdh
+	self.walkSpeed = cfg.WalkSpeed
+	self.jumpPower = cfg.JumpPower
+	self.hipHeight = cfg.HipHeight
+	self.maid = Util.Maid.new()
+	self.lastSafe = startCF.Position
+	self._nextSafe = 0
+
+	local model, hum, root, parts = buildModel(startCF, cfg)
+	self.model = model
+	self.Humanoid = hum
+	self.Root = root
+	self.parts = parts
+	model.Parent = Workspace
+	pcall(function()
+		model.ModelStreamingMode = Enum.ModelStreamingMode.Persistent
+	end)
+	pcall(function()
+		hum:SetStateEnabled(Enum.HumanoidStateType.Dead, false)
+	end)
+	pcall(function()
+		root.RootPriority = 67
+	end)
+	self.maid:Give(model)
+
+	self.Position = root.Position
+	self.CF = root.CFrame
+	self.Velocity = Vector3.zero
+	self.State = "idle"
+
+	self.maid:Give(RunService.PreAnimation:Connect(function()
+		self:_control()
+	end))
+	self.maid:Give(RunService.PreSimulation:Connect(function()
+		self:_collision()
+	end))
+	self.maid:Give(RunService.PostSimulation:Connect(function()
+		self:_post()
+	end))
+	return self
+end
+
+function Proxy:SetWalkSpeed(n)
+	self.walkSpeed = n
+end
+
+function Proxy:SetJumpPower(n)
+	self.jumpPower = n
+end
+
+function Proxy:SetHipHeight(n)
+	self.hipHeight = n
+end
+
+function Proxy:Teleport(cf)
+	self.Root.CFrame = cf
+	self.Root.AssemblyLinearVelocity = Vector3.zero
+	self.Root.AssemblyAngularVelocity = Vector3.zero
+end
+
+-- before physics: feed the humanoid its movement and jump
+function Proxy:_control()
+	local hum = self.Humanoid
+	local input = self.input
+	local cam = self.camera
+	local yawCF = CFrame.Angles(0, cam.Yaw, 0)
+	local dir = yawCF:VectorToWorldSpace(input.Move)
+	local speed = self.walkSpeed
+	if input.Sprint then
+		speed = speed * self.cfg.SprintMul
+	end
+	if hum.WalkSpeed ~= speed then
+		hum.WalkSpeed = speed
+	end
+	if hum.JumpPower ~= self.jumpPower then
+		hum.JumpPower = self.jumpPower
+	end
+	if hum.HipHeight ~= self.hipHeight then
+		hum.HipHeight = self.hipHeight
+	end
+	local lockedToCamera = cam.Shiftlock or cam.FirstPerson
+	if hum.AutoRotate == lockedToCamera then
+		hum.AutoRotate = not lockedToCamera
+	end
+	hum:Move(dir)
+	hum.Jump = input.Jump
+end
+
+-- before each physics step: only the root collides while the humanoid is "running"
+function Proxy:_collision()
+	local light = LIGHT_STATES[self.Humanoid:GetState()] == true
+	local parts = self.parts
+	local root = self.Root
+	for i = 1, #parts do
+		local p = parts[i]
+		local want = true
+		if light then
+			want = (p == root)
+		end
+		if p.CanCollide ~= want then
+			p.CanCollide = want
+		end
+	end
+end
+
+-- after physics: void rescue, remember safe ground, face the camera when locked
+function Proxy:_post()
+	local root = self.Root
+	local pos = root.Position
+	if pos.Y < self.fpdh + 5 then
+		root.CFrame = CFrame.new(self.lastSafe + Vector3.new(0, 5, 0)) * root.CFrame.Rotation
+		root.AssemblyLinearVelocity = Vector3.new(0, 50, 0)
+		root.AssemblyAngularVelocity = Vector3.zero
+		return
+	end
+	local now = os.clock()
+	if self.Humanoid:GetState() == HST.Running and now >= self._nextSafe then
+		self._nextSafe = now + 0.25
+		self.lastSafe = pos
+	end
+	local cam = self.camera
+	if cam.Shiftlock or cam.FirstPerson then
+		root.CFrame = CFrame.new(pos) * CFrame.Angles(0, cam.Yaw, 0)
+	end
+end
+
+-- Heartbeat: publish position / velocity / simple state for everyone else
+function Proxy:Step(dt)
+	local root = self.Root
+	self.Position = root.Position
+	self.CF = root.CFrame
+	local vel = root.AssemblyLinearVelocity
+	self.Velocity = vel
+	local flatSpeed = Vector3.new(vel.X, 0, vel.Z).Magnitude
+	local st = self.Humanoid:GetState()
+	local s = "fall"
+	if st == HST.Running or st == HST.RunningNoPhysics or st == HST.Landed then
+		if flatSpeed > 1 then
+			s = "walk"
+		else
+			s = "idle"
+		end
+	elseif st == HST.Jumping then
+		s = "jump"
+	elseif st == HST.Freefall then
+		if vel.Y > 0 then
+			s = "jump"
+		end
+	elseif st == HST.Seated then
+		s = "idle"
+	end
+	self.State = s
+end
+
+function Proxy:Destroy()
+	self.maid:Clean()
+end
+
+return Proxy
+end
+
+__defs["body/virtual"] = function(require)
+-- body/virtual.lua
+-- Patchma-style kinematic body: no instances at all. Ground comes from one
+-- downward raycast, gravity and jumping are integrated by hand (Yvel), and the
+-- root rides at ground + 3 + HipHeight. Light and predictable, but it has no
+-- horizontal collision (it walks through walls) - that is what the proxy is for.
+
+local Players = game:GetService("Players")
+local Workspace = game:GetService("Workspace")
+
+local Virtual = {}
+Virtual.__index = Virtual
+
+-- deps = { input, camera, fpdh }
+function Virtual.new(cfg, deps, startCF)
+	local self = setmetatable({}, Virtual)
+	self.cfg = cfg
+	self.input = deps.input
+	self.camera = deps.camera
+	self.fpdh = deps.fpdh
+	self.walkSpeed = cfg.WalkSpeed
+	self.jumpPower = cfg.JumpPower
+	self.hipHeight = cfg.HipHeight
+	self.Position = startCF.Position
+	self.Velocity = Vector3.zero
+	self.State = "idle"
+	self.yvel = 0
+	self.onGround = false
+	self.lastSafe = startCF.Position
+	self._nextSafe = 0
+	self._nextFilter = 0
+
+	local look = startCF.LookVector
+	local flat = Vector3.new(look.X, 0, look.Z)
+	if flat.Magnitude < 0.001 then
+		flat = Vector3.new(0, 0, -1)
+	end
+	self.facing = CFrame.lookAt(Vector3.zero, flat)
+	self.CF = CFrame.new(self.Position) * self.facing
+
+	local params = RaycastParams.new()
+	params.FilterType = Enum.RaycastFilterType.Exclude
+	params.RespectCanCollide = true
+	params.IgnoreWater = true
+	self.rayParams = params
+	return self
+end
+
+function Virtual:SetWalkSpeed(n)
+	self.walkSpeed = n
+end
+
+function Virtual:SetJumpPower(n)
+	self.jumpPower = n
+end
+
+function Virtual:SetHipHeight(n)
+	self.hipHeight = n
+end
+
+function Virtual:Teleport(cf)
+	self.Position = cf.Position
+	self.yvel = 0
+	self.Velocity = Vector3.zero
+	self.CF = CFrame.new(self.Position) * self.facing
+end
+
+function Virtual:_refreshFilter(now)
+	if now < self._nextFilter then
+		return
+	end
+	self._nextFilter = now + 0.5
+	local list = {}
+	for _, plr in ipairs(Players:GetPlayers()) do
+		if plr.Character then
+			list[#list + 1] = plr.Character
+		end
+	end
+	self.rayParams.FilterDescendantsInstances = list
+end
+
+function Virtual:Step(dt)
+	if dt <= 0 then
+		return
+	end
+	local now = os.clock()
+	self:_refreshFilter(now)
+	local input = self.input
+	local cam = self.camera
+
+	-- horizontal motion, relative to the camera yaw
+	local yawCF = CFrame.Angles(0, cam.Yaw, 0)
+	local dir = yawCF:VectorToWorldSpace(input.Move)
+	local speed = self.walkSpeed
+	if input.Sprint then
+		speed = speed * self.cfg.SprintMul
+	end
+	local pos = self.Position
+	local oldPos = pos
+	local hh = 3 + self.hipHeight
+
+	-- ground probe
+	local groundY = nil
+	if pos.Y > self.fpdh then
+		local hit = Workspace:Raycast(pos, Vector3.new(0, self.fpdh - pos.Y, 0), self.rayParams)
+		if hit then
+			groundY = hit.Position.Y
+		end
+	end
+
+	-- vertical: stand, jump or fall
+	local yvel = self.yvel
+	local onGround = false
+	if groundY and (pos.Y - groundY) < hh + 0.05 and yvel <= 0 then
+		onGround = true
+		yvel = 0
+		local targetY = groundY + hh
+		pos = Vector3.new(pos.X, pos.Y + (targetY - pos.Y) * math.min(dt * 20, 1), pos.Z)
+		if input.Jump and self.jumpPower > 0 then
+			yvel = self.jumpPower
+			onGround = false
+		end
+	else
+		yvel = yvel - Workspace.Gravity * dt
+		if groundY and yvel <= 0 and pos.Y + yvel * dt < groundY + hh then
+			-- would pass through the floor this frame: land on it
+			pos = Vector3.new(pos.X, groundY + hh, pos.Z)
+			yvel = 0
+			onGround = true
+		end
+	end
+
+	pos = pos + Vector3.new(dir.X * speed * dt, yvel * dt, dir.Z * speed * dt)
+
+	-- fell out of the world: back to the last safe spot
+	if pos.Y < self.fpdh + 5 then
+		pos = self.lastSafe + Vector3.new(0, 5, 0)
+		yvel = 0
+	end
+	if onGround and now >= self._nextSafe then
+		self._nextSafe = now + 0.25
+		self.lastSafe = pos
+	end
+
+	-- facing
+	local flat = Vector3.new(dir.X, 0, dir.Z)
+	if cam.Shiftlock or cam.FirstPerson then
+		self.facing = yawCF
+	elseif flat.Magnitude > 0.05 then
+		self.facing = self.facing:Lerp(CFrame.lookAt(Vector3.zero, flat), math.min(dt * 12, 1))
+	end
+
+	local state = "fall"
+	if onGround then
+		if flat.Magnitude > 0.05 then
+			state = "walk"
+		else
+			state = "idle"
+		end
+	elseif yvel > 0 then
+		state = "jump"
+	end
+
+	self.yvel = yvel
+	self.onGround = onGround
+	self.State = state
+	self.Position = pos
+	self.CF = CFrame.new(pos) * self.facing
+	self.Velocity = (pos - oldPos) / dt
+end
+
+function Virtual:Destroy()
+end
+
+return Virtual
+end
+
 __defs["claim/claim"] = function(require)
 -- claim/claim.lua
 -- Per-hat claim state machine, ownership metrics and reclaim logic.
@@ -241,6 +1275,17 @@ function Claim:SetVariant(name)
 	end
 end
 
+function Claim:CountState(state)
+	local n = 0
+	for i = 1, #self.entries do
+		local e = self.entries[i]
+		if e.Handle and e.State == state then
+			n = n + 1
+		end
+	end
+	return n
+end
+
 function Claim:GetHandles()
 	local out = {}
 	for i = 1, #self.entries do
@@ -414,6 +1459,13 @@ function Claim:_align(e, index, count, dt, now)
 
 	if h.CanCollide then
 		h.CanCollide = false
+	end
+	local getLTM = self.deps.getLTM
+	if getLTM then
+		local ltm = getLTM()
+		if h.LocalTransparencyModifier ~= ltm then
+			h.LocalTransparencyModifier = ltm
+		end
 	end
 	h.AssemblyLinearVelocity = nv
 	h.CFrame = targetCF
@@ -872,7 +1924,7 @@ function Start.run(ctx)
 					ctx.log("start: hats free via '" .. name .. "'")
 					return true, name
 				end
-				task.wait(0.1)
+				task.wait()
 			end
 			ctx.log("start: '" .. name .. "' timed out")
 		else
@@ -893,7 +1945,7 @@ __defs["core/config"] = function(require)
 local Config = {}
 
 Config.Defaults = {
-	Version = "0.1.0-claim",
+	Version = "0.2.0-body",
 
 	Claim = {
 		SimRadiusPerPlayer = 1000,
@@ -902,7 +1954,7 @@ Config.Defaults = {
 		VoidMargin = 1,
 		NaNDestroyHeight = false,  -- set Workspace.FallenPartsDestroyHeight to NaN while running
 		OwnerCheck = "receiveage", -- "receiveage" | "isnetworkowner"
-		HeavyPhase = 5.67,         -- seconds a freshly claimed hat stays non-massless
+		HeavyPhase = 2,            -- seconds a freshly claimed hat stays non-massless (the respawn loop is ~5s, so 5.67 never finished)
 		MasslessDensity = 0.01,
 		BurstTime = 0.51,          -- seconds of return-to-body velocity after (re)claiming
 		BurstMode = "ballistic",   -- "ballistic" | "up" | "none"
@@ -933,8 +1985,10 @@ Config.Defaults = {
 	Start = {
 		AutoRun = true,
 		Order = { "server", "client" },
-		Timeout = 3,
-		ScanDelay = 0.6,
+		Timeout = 2,
+		ScanDelay = 0,             -- seconds to wait after a respawn before looking at hats
+		SettleMin = 0.08,          -- accessory list must be stable for at least this long...
+		SettleMax = 0.6,           -- ...but we never wait longer than this
 		DisableCharScripts = true,
 		AutoRestartOnRespawn = true,
 	},
@@ -944,9 +1998,26 @@ Config.Defaults = {
 		DisableThrottle = false,
 	},
 
+	Body = {
+		Mode = "proxy",           -- "proxy" (hidden humanoid, real collisions) | "virtual" (raycast + gravity)
+		WalkSpeed = 30,
+		JumpPower = 50,
+		HipHeight = 0,
+		SprintMul = 2.5,          -- hold Left Ctrl
+	},
+
+	Camera = {
+		Sensitivity = 1,
+		MinZoom = 0.5,
+		MaxZoom = 400,
+		InitialZoom = 12,
+		ShiftLock = true,         -- Left Shift toggles
+		ShiftLockOffset = 1.75,
+	},
+
+	HideDeathEffect = true,       -- hide the health bar and the red hurt overlay
+
 	Harness = {
-		MoveSpeed = 30,
-		SprintMul = 3,
 		Formation = "ring",
 		TeleportDistance = 80,
 	},
@@ -1214,14 +2285,13 @@ end
 
 __defs["harness/driver"] = function(require)
 -- harness/driver.lua
--- Test driver: a client-only anchor part that you fly around with WASD, and a
--- set of formations that give every hat a target relative to that anchor.
--- This stands in for the real body/skeleton until that exists, so the claim
--- system can be measured on its own.
+-- Formations: give every hat a target relative to the body so the claim system
+-- can be measured on its own. The body itself (movement, jumping, falling) now
+-- lives in body/; this file only turns "where the body is" into hat targets.
 
 local Util = require("core/util")
 
-local UserInputService = game:GetService("UserInputService")
+local Players = game:GetService("Players")
 local Workspace = game:GetService("Workspace")
 
 local Driver = {}
@@ -1259,31 +2329,16 @@ Formations.Fns.static = function(i, n, t)
 end
 
 ----------------------------------------------------------------------
--- construction
+-- driver
 ----------------------------------------------------------------------
-function Driver.new(cfg, maid, startCF)
+function Driver.new(cfg, body)
 	local self = setmetatable({}, Driver)
 	self.cfg = cfg
+	self.body = body
 	self.formationName = cfg.Formation
 	if not Formations.Fns[self.formationName] then
 		self.formationName = "ring"
 	end
-	self.velocity = Vector3.zero
-	self.CF = CFrame.new(startCF.Position)
-
-	local part = Instance.new("Part")
-	part.Name = Util.randomString()
-	part.Anchored = true
-	part.CanCollide = false
-	part.CanQuery = false
-	part.CanTouch = false
-	part.CastShadow = false
-	part.Transparency = 1
-	part.Size = Vector3.new(1, 1, 1)
-	part.CFrame = self.CF
-	part.Parent = Workspace
-	maid:Give(part)
-	self.Anchor = part
 	return self
 end
 
@@ -1291,76 +2346,33 @@ function Driver:CycleFormation()
 	self.formationName = Util.cycle(Formations.Order, self.formationName)
 end
 
--- camera-relative flat basis (look, right)
-local function flatBasis()
-	local cam = Workspace.CurrentCamera
-	if not cam then
-		return Vector3.new(0, 0, -1), Vector3.new(1, 0, 0)
-	end
-	local look = cam.CFrame.LookVector
-	local flat = Vector3.new(look.X, 0, look.Z)
-	if flat.Magnitude < 0.001 then
-		flat = Vector3.new(0, 0, -1)
-	else
-		flat = flat.Unit
-	end
-	return flat, flat:Cross(Vector3.new(0, 1, 0))
-end
-
+-- jump the body forward (flat, camera-relative) and drop it onto the ground there
 function Driver:Teleport(distance)
-	local look = flatBasis()
-	self.CF = CFrame.new(self.CF.Position + look * distance)
-	self.velocity = Vector3.zero
-	self.Anchor.CFrame = self.CF
-end
-
-function Driver:Step(dt)
-	if dt <= 0 then
-		return
-	end
-	local move = Vector3.zero
-	if not UserInputService:GetFocusedTextBox() then
-		local look, right = flatBasis()
-		local up = Vector3.new(0, 1, 0)
-		if UserInputService:IsKeyDown(Enum.KeyCode.W) then
-			move = move + look
-		end
-		if UserInputService:IsKeyDown(Enum.KeyCode.S) then
-			move = move - look
-		end
-		if UserInputService:IsKeyDown(Enum.KeyCode.D) then
-			move = move + right
-		end
-		if UserInputService:IsKeyDown(Enum.KeyCode.A) then
-			move = move - right
-		end
-		if UserInputService:IsKeyDown(Enum.KeyCode.Space) then
-			move = move + up
-		end
-		if UserInputService:IsKeyDown(Enum.KeyCode.LeftControl) or UserInputService:IsKeyDown(Enum.KeyCode.C) then
-			move = move - up
-		end
-	end
-	if move.Magnitude > 0 then
-		move = move.Unit
-	end
-	local speed = self.cfg.MoveSpeed
-	if UserInputService:IsKeyDown(Enum.KeyCode.LeftShift) then
-		speed = speed * self.cfg.SprintMul
-	end
-	local oldPos = self.CF.Position
-	local newPos = oldPos + move * speed * dt
-	self.velocity = (newPos - oldPos) / dt
-	self.CF = CFrame.new(newPos)
-	self.Anchor.CFrame = self.CF
-end
-
--- keep the camera glued to the anchor (the real humanoid is dead)
-function Driver:EnforceCamera()
+	local look = Vector3.new(0, 0, -1)
 	local cam = Workspace.CurrentCamera
-	if cam and cam.CameraSubject ~= self.Anchor then
-		cam.CameraSubject = self.Anchor
+	if cam then
+		local l = cam.CFrame.LookVector
+		local flat = Vector3.new(l.X, 0, l.Z)
+		if flat.Magnitude > 0.001 then
+			look = flat.Unit
+		end
 	end
+	local target = self.body:GetPosition() + look * distance
+
+	local characters = {}
+	for _, plr in ipairs(Players:GetPlayers()) do
+		if plr.Character then
+			characters[#characters + 1] = plr.Character
+		end
+	end
+	local params = RaycastParams.new()
+	params.FilterType = Enum.RaycastFilterType.Exclude
+	params.FilterDescendantsInstances = characters
+	local hit = Workspace:Raycast(target + Vector3.new(0, 200, 0), Vector3.new(0, -400, 0), params)
+	if hit then
+		target = hit.Position + Vector3.new(0, 4, 0)
+	end
+	self.body:Teleport(CFrame.new(target))
 end
 
 -- provider for the claim system: formation slot -> target CFrame + velocity
@@ -1368,7 +2380,8 @@ function Driver:GetProvider()
 	return function(entry, index, count, now)
 		local fn = Formations.Fns[self.formationName]
 		local offset, yaw = fn(index, count, now)
-		return self.CF * CFrame.new(offset) * CFrame.Angles(0, yaw, 0), self.velocity
+		local base = CFrame.new(self.body:GetPosition())
+		return base * CFrame.new(offset) * CFrame.Angles(0, yaw, 0), self.body:GetVelocity()
 	end
 end
 
@@ -1428,7 +2441,7 @@ local function pickParent()
 	return Players.LocalPlayer:WaitForChild("PlayerGui")
 end
 
--- opts = { maid, claim, driver, actions = { { text = fn, run = fn }, ... }, version }
+-- opts = { maid, claim, actions = { { text = fn, run = fn }, ... }, version, getBodyInfo = fn }
 function Overlay.new(opts)
 	local maid = opts.maid
 	local claim = opts.claim
@@ -1491,26 +2504,28 @@ function Overlay.new(opts)
 	capsLabel.TextColor3 = Color3.fromRGB(150, 150, 165)
 
 	local summary = makeLabel(3, 30, 12)
+	local bodyLabel = makeLabel(4, 30, 12)
+	bodyLabel.TextColor3 = Color3.fromRGB(170, 215, 255)
 
 	local rowsFrame = Instance.new("Frame")
 	rowsFrame.BackgroundTransparency = 1
 	rowsFrame.AutomaticSize = Enum.AutomaticSize.Y
 	rowsFrame.Size = UDim2.new(1, 0, 0, 0)
-	rowsFrame.LayoutOrder = 4
+	rowsFrame.LayoutOrder = 5
 	rowsFrame.Parent = root
 	local rowsLayout = Instance.new("UIListLayout")
 	rowsLayout.SortOrder = Enum.SortOrder.LayoutOrder
 	rowsLayout.Parent = rowsFrame
 	local rowLabels = {}
 
-	local logLabel = makeLabel(5, 84, 11)
+	local logLabel = makeLabel(6, 84, 11)
 	logLabel.TextColor3 = Color3.fromRGB(170, 170, 185)
 
 	local buttonsFrame = Instance.new("Frame")
 	buttonsFrame.BackgroundTransparency = 1
 	buttonsFrame.AutomaticSize = Enum.AutomaticSize.Y
 	buttonsFrame.Size = UDim2.new(1, 0, 0, 0)
-	buttonsFrame.LayoutOrder = 6
+	buttonsFrame.LayoutOrder = 7
 	buttonsFrame.Parent = root
 	local grid = Instance.new("UIGridLayout")
 	grid.CellSize = UDim2.new(0.5, -3, 0, 24)
@@ -1562,6 +2577,12 @@ function Overlay.new(opts)
 			s.claimAvg, s.reownAvg, s.stage2, s.stage2ok, s.simMethod
 		)
 
+		local info = opts.getBodyInfo()
+		bodyLabel.Text = string.format(
+			"body: %s  state: %s  speed %g  jump %g  hip %g\ncamera zoom %.1f%s",
+			info.mode, info.state, info.walk, info.jump, info.hip, info.zoom, info.lock
+		)
+
 		local entries = claim.entries
 		for i = 1, #entries do
 			local e = entries[i]
@@ -1611,7 +2632,13 @@ function Overlay.new(opts)
 		end
 	end)
 
-	return { Gui = gui }
+	local function contains(p)
+		local ap = root.AbsolutePosition
+		local as = root.AbsoluteSize
+		return p.X >= ap.X and p.Y >= ap.Y and p.X <= ap.X + as.X and p.Y <= ap.Y + as.Y
+	end
+
+	return { Gui = gui, Contains = contains }
 end
 
 return Overlay
@@ -1619,18 +2646,23 @@ end
 
 __defs["init"] = function(require)
 -- init.lua
--- Wires config, claim core, start-up strategies and the test harness together.
+-- Wires config, input, camera, body, claim core, start-up strategies and the
+-- test harness together.
 
 local Util = require("core/util")
 local Config = require("core/config")
 local Claim = require("claim/claim")
 local Start = require("claim/start")
 local Netless = require("claim/netless")
+local Input = require("body/input")
+local CameraRig = require("body/camera")
+local Body = require("body/body")
 local Driver = require("harness/driver")
 local Overlay = require("harness/overlay")
 
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
+local StarterGui = game:GetService("StarterGui")
 local Workspace = game:GetService("Workspace")
 
 local M = {}
@@ -1647,6 +2679,8 @@ function M.start(userCfg)
 	local player = Players.LocalPlayer
 	local running = true
 	local api = {}
+	local overlay = nil
+	local body = nil
 
 	local function getRoot()
 		local ch = player.Character
@@ -1656,7 +2690,13 @@ function M.start(userCfg)
 		return nil
 	end
 
-	-- where the test anchor starts: on top of the real character if there is one
+	-- destroy height, read before the claim core may set it to NaN
+	local fpdh = Workspace.FallenPartsDestroyHeight
+	if fpdh ~= fpdh or fpdh == -math.huge then
+		fpdh = -500
+	end
+
+	-- the body starts where the real character is standing
 	local startCF = CFrame.new(0, 10, 0)
 	local root = getRoot()
 	if root then
@@ -1665,7 +2705,84 @@ function M.start(userCfg)
 		startCF = CFrame.new(Workspace.CurrentCamera.Focus.Position)
 	end
 
-	local driver = Driver.new(cfg.Harness, maid, startCF)
+	----------------------------------------------------------------
+	-- input, camera, body
+	----------------------------------------------------------------
+	local input = Input.new(maid, {
+		isOverGui = function(p)
+			return overlay ~= nil and overlay.Contains(p)
+		end,
+	})
+	local camRig = CameraRig.new(cfg.Camera, maid, input, function()
+		if body then
+			return body:GetPosition()
+		end
+		return nil
+	end)
+	body = Body.new(cfg.Body, { input = input, camera = camRig, fpdh = fpdh }, startCF)
+	maid:Give(function()
+		body:Destroy()
+	end)
+
+	----------------------------------------------------------------
+	-- death effects: health bar + red hurt overlay
+	----------------------------------------------------------------
+	local healthWasOn = true
+	pcall(function()
+		healthWasOn = StarterGui:GetCoreGuiEnabled(Enum.CoreGuiType.Health)
+	end)
+	local function hideHealth()
+		if cfg.HideDeathEffect then
+			pcall(function()
+				StarterGui:SetCoreGuiEnabled(Enum.CoreGuiType.Health, false)
+			end)
+		end
+	end
+	hideHealth()
+	maid:Give(function()
+		if cfg.HideDeathEffect and healthWasOn then
+			pcall(function()
+				StarterGui:SetCoreGuiEnabled(Enum.CoreGuiType.Health, true)
+			end)
+		end
+	end)
+
+	local hurt = nil
+	local nextHurtSearch = 0
+	local function hideHurtOverlay(now)
+		if not cfg.HideDeathEffect then
+			return
+		end
+		if hurt and hurt.Parent then
+			if hurt.Visible then
+				hurt.Visible = false
+			end
+			return
+		end
+		if now >= nextHurtSearch then
+			nextHurtSearch = now + 1
+			pcall(function()
+				hurt = game:GetService("CoreGui").TopBarApp.TopBarApp.FullScreenFrame.HurtOverlay
+			end)
+		end
+	end
+
+	-- the real (dead) body must never push the proxy around
+	local function ghostReal()
+		local ch = player.Character
+		if not ch then
+			return
+		end
+		for _, v in ipairs(ch:GetChildren()) do
+			if v:IsA("BasePart") and v.CanCollide then
+				v.CanCollide = false
+			end
+		end
+	end
+
+	----------------------------------------------------------------
+	-- claim core + formations
+	----------------------------------------------------------------
 	local claim = Claim.new(cfg, {
 		getRoot = getRoot,
 		getBodyPos = function()
@@ -1673,12 +2790,16 @@ function M.start(userCfg)
 			if r then
 				return r.Position
 			end
-			return nil
+			return body:GetPosition()
 		end,
 		getFollowCF = function()
-			return driver.CF
+			return CFrame.new(body:GetPosition())
+		end,
+		getLTM = function()
+			return camRig.LTM
 		end,
 	})
+	local driver = Driver.new(cfg.Harness, body)
 	claim:SetProvider(driver:GetProvider())
 
 	----------------------------------------------------------------
@@ -1691,30 +2812,40 @@ function M.start(userCfg)
 		end
 		token = token + 1
 		local myToken = token
+		hideHealth()
 		task.spawn(function()
 			local hum = char:WaitForChild("Humanoid", 10)
 			if not hum then
 				return
 			end
-			task.wait(cfg.Start.ScanDelay)
+			if cfg.Start.ScanDelay > 0 then
+				task.wait(cfg.Start.ScanDelay)
+			end
 			if not running or myToken ~= token then
 				return
 			end
 			claim:Track(char)
-			-- wait for the accessory list to settle
-			local previousCount = -1
-			for _ = 1, 15 do
+			-- wait (frame by frame) until the accessory list has settled
+			local t0 = os.clock()
+			local stable = 0
+			local last = -1
+			while os.clock() - t0 < cfg.Start.SettleMax do
 				local n = #claim:GetHandles()
-				if n > 0 and n == previousCount then
+				if n > 0 and n == last then
+					stable = stable + 1
+				else
+					stable = 0
+				end
+				last = n
+				if stable >= 2 and os.clock() - t0 >= cfg.Start.SettleMin then
 					break
 				end
-				previousCount = n
-				task.wait(0.2)
+				task.wait()
 			end
 			if not running or myToken ~= token then
 				return
 			end
-			Start.run({
+			local startCtx = {
 				char = char,
 				cfg = cfg.Start,
 				getHandles = function()
@@ -1726,7 +2857,18 @@ function M.start(userCfg)
 				isAlive = function()
 					return running and myToken == token and char.Parent ~= nil
 				end,
-			})
+			}
+			Start.run(startCtx)
+
+			-- accessories that arrive after the kill are welded to the dead head: free them too
+			local sweepUntil = os.clock() + 2
+			while os.clock() < sweepUntil and startCtx.isAlive() do
+				task.wait(0.15)
+				if claim:CountState("Attached") > 0 then
+					claim:_log("late hat found, freeing again")
+					Start.run(startCtx)
+				end
+			end
 		end)
 	end
 
@@ -1742,12 +2884,18 @@ function M.start(userCfg)
 	----------------------------------------------------------------
 	-- frame loops
 	----------------------------------------------------------------
+	local renderName = "Exire_" .. Util.randomString()
+	RunService:BindToRenderStep(renderName, Enum.RenderPriority.Camera.Value + 1, function(dt)
+		camRig:Update(dt)
+		hideHurtOverlay(os.clock())
+	end)
+	maid:Give(function()
+		RunService:UnbindFromRenderStep(renderName)
+	end)
 	maid:Give(RunService.Heartbeat:Connect(function(dt)
-		driver:Step(dt)
+		body:Step(dt)
+		ghostReal()
 		claim:Step(dt)
-	end))
-	maid:Give(RunService.RenderStepped:Connect(function()
-		driver:EnforceCamera()
 	end))
 
 	----------------------------------------------------------------
@@ -1761,6 +2909,38 @@ function M.start(userCfg)
 	end
 
 	local actions = {
+		{
+			text = function()
+				return "physics: " .. body.mode
+			end,
+			run = function()
+				body:SetMode(Util.cycle(Body.Modes, body.mode))
+			end,
+		},
+		{
+			text = function()
+				return "walkspeed: " .. tostring(body.walkSpeed)
+			end,
+			run = function()
+				body:SetWalkSpeed(Util.cycle({ 16, 30, 60, 100 }, body.walkSpeed))
+			end,
+		},
+		{
+			text = function()
+				return "jump power: " .. tostring(body.jumpPower)
+			end,
+			run = function()
+				body:SetJumpPower(Util.cycle({ 50, 80, 120 }, body.jumpPower))
+			end,
+		},
+		{
+			text = function()
+				return "hip height: " .. tostring(body.hipHeight)
+			end,
+			run = function()
+				body:SetHipHeight(Util.cycle({ 0, 4, 10 }, body.hipHeight))
+			end,
+		},
 		{
 			text = function()
 				return "netless: " .. claim.variant
@@ -1851,12 +3031,26 @@ function M.start(userCfg)
 		},
 	}
 
-	Overlay.new({
+	overlay = Overlay.new({
 		maid = maid,
 		claim = claim,
-		driver = driver,
 		actions = actions,
 		version = cfg.Version,
+		getBodyInfo = function()
+			local lock = ""
+			if camRig.Shiftlock then
+				lock = "  [shift lock]"
+			end
+			return {
+				mode = body.mode,
+				state = body:GetState(),
+				walk = body.walkSpeed,
+				jump = body.jumpPower,
+				hip = body.hipHeight,
+				zoom = camRig.Zoom,
+				lock = lock,
+			}
+		end,
 	})
 
 	----------------------------------------------------------------
@@ -1887,6 +3081,9 @@ function M.start(userCfg)
 
 	api.Config = cfg
 	api.Claim = claim
+	api.Body = body
+	api.Camera = camRig
+	api.Input = input
 	api.Driver = driver
 	env.ExireReanimate = api
 	return api
