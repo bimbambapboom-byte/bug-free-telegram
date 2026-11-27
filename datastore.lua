@@ -1319,6 +1319,7 @@ function Claim:_bind(accessory, handle)
 	entry.Accessory = accessory
 	entry.Handle = handle
 	entry.Name = accessory.Name
+	entry.Mesh, entry.Tex = meshInfo(handle)
 	entry.State = "Attached"
 	entry.LastPos = nil
 	entry.GoneSince = nil
@@ -1639,6 +1640,7 @@ function Claim:_cleanup(now)
 	for i = #list, 1, -1 do
 		local e = list[i]
 		if e.State == "Gone" and e.GoneSince and (now - e.GoneSince) > 60 then
+			e.Removed = true
 			table.remove(list, i)
 		end
 	end
@@ -1945,7 +1947,7 @@ __defs["core/config"] = function(require)
 local Config = {}
 
 Config.Defaults = {
-	Version = "0.2.0-body",
+	Version = "0.3.0-rig",
 
 	Claim = {
 		SimRadiusPerPlayer = 1000,
@@ -2014,6 +2016,26 @@ Config.Defaults = {
 		ShiftLock = true,         -- Left Shift toggles
 		ShiftLockOffset = 1.75,
 	},
+
+	Modes = {
+		LoadBuiltin = true,       -- register the built-in Default and Hover modes
+		DefaultMode = {
+			Enabled = true,       -- true: pressing the active mode's key returns to Default, and Default is the fallback
+			Id = "default",       -- false: same key does nothing, no return-to-default, no inheritance
+		},
+		HipBlend = 10,            -- per second: how fast HipHeight eases between sections
+		ResetPoseOnSwitch = false,-- snap every joint to rest when a mode is entered (a mode can override with ResetPose)
+		-- StartMode = "hover",   -- used when the default mode is disabled
+		-- Register = function(modes) modes:Register({...}) end,
+	},
+
+	Binder = {
+		UseRigDb = true,          -- known hat-built rigs (data/rigs.lua)
+		UseAttachments = true,    -- fall back to the hat's own attachment
+		ParkUnknown = true,       -- hats nothing matches are parked next to the body instead of dropped
+	},
+
+	Targets = "rig",              -- "rig" (skeleton) | "formation" (claim test patterns)
 
 	HideDeathEffect = true,       -- hide the health bar and the red hurt overlay
 
@@ -2281,6 +2303,147 @@ end
 Util.Signal = Signal
 
 return Util
+end
+
+__defs["data/rigs"] = function(require)
+-- data/rigs.lua
+-- Known hat-built rigs: which accessory becomes which limb and how its mesh is
+-- rotated. Entries are tried in order and each entry is used at most once per
+-- session (first match wins), so specific entries come before broad ones.
+--   Part : limb name (Torso, Head, Left Arm, Right Arm, Left Leg, Right Leg)
+--   mesh / tex / name : any of them may be nil (= wildcard)
+--   C0 follows Patchma's convention: handle = limb * C0:Inverse()
+-- Data comes from Patchma's `aligns` table (rqz / MyWorld) plus Exire's own
+-- entries at the top.
+
+local angles = CFrame.Angles
+local cf = CFrame.new
+local rad = math.rad
+
+local function E(part, mesh, tex, c0, name)
+	return { Part = part, mesh = mesh, tex = tex, name = name, C0 = c0 or CFrame.identity }
+end
+
+return {
+	-- Exire's entries
+	E("Torso", "104613079991268", "83269599235494", angles(0, 0, 0)),
+	E("Left Arm", "96333112188696", "18807356481", angles(0, 0, 0)),
+	E("Right Arm", "96130316788066", "18807356481", angles(0, 0, 0)),
+	E("Left Arm", "137702817952968", "135650240593878", angles(0, 0, 80.05)),
+	E("Right Arm", "137702817952968", "135650240593878", angles(0, 0, 80.05)),
+	E("Left Leg", "137702817952968", "73798034827573", angles(0, 0, 80.09)),
+	E("Right Leg", "137702817952968", "73798034827573", angles(0, 0, 80.09)),
+	E("Right Leg", "100128920324073", "133680105074740", angles(rad(-75), rad(15), rad(-20))),
+	E("Right Arm", "100128920324073", "97155254696037", angles(rad(-75), rad(15), rad(-20))),
+	E("Left Arm", "130309145260656", "82390202293774", angles(rad(-75), rad(-15), rad(20))),
+	E("Left Leg", "130309145260656", "93374633946646", angles(rad(-75), rad(-15), rad(20))),
+	E("Torso", "18919712035", "18430134193", CFrame.identity),
+	E("Left Leg", "18881741455", "18430134193", angles(0, 0, 0)),
+	E("Right Leg", "18881739115", "18430134193", angles(0, 0, 0)),
+
+	-- unknown head
+	E("Head", "11601535857", nil, angles(0, 3.141592653589793, 0)),
+
+	-- patchma gear arms
+	E("Left Arm", "13831073174", nil, cf(0.017, 0, -0.23) * angles(-1.4835298641951802, -0.15707963267948966, 2.199114857512855)),
+	E("Right Arm", "13839903766", nil, cf(0, -0.62, -0.01) * angles(1.6580627893946132, 0.15707963267948966, -2.199114857512855)),
+
+	-- patchma yellow leg
+	E("Left Leg", "11159370334", "11159285454", angles(1.5707963267948966, 0, 1.5707963267948966)),
+
+	-- patchma lego piece leg
+	E("Right Leg", "12652772399", "12652775021", cf(0, -0.125, 0)),
+
+	-- offsale white rig / offsaled black torsos
+	E("Torso", "14768666349"),
+	E("Torso", "14241018198"),
+	E("Torso", "13421774668"),
+	E("Left Leg", "14255522247", nil, angles(1.5707963267948966, 0, 1.5707963267948966)),
+	E("Right Leg", "14255522247", nil, angles(-1.5707963267948966, 0, 1.5707963267948966)),
+	E("Left Arm", "14768684979", nil, angles(0, 0, 1.5707963267948966)),
+	E("Right Arm", "14768684979", nil, angles(0, 0, 1.5707963267948966)),
+
+	-- og fur body, r15 arms, smiley legs rig
+	E("Head", "13953154391"),
+	E("Torso", "13778226115"),
+	E("Left Leg", "11159370334", "11159284657", angles(1.5707963267948966, 0, 1.5707963267948966)),
+	E("Right Leg", "11263221350", "11263219250", angles(-1.5707963267948966, 0, 1.5707963267948966)),
+	E("Left Arm", "12344207333", nil, angles(2, 0, 0)),
+	E("Right Arm", "12344206657", nil, angles(2, 0, 0)),
+
+	-- torso for both "white limbs black torso rig" and "black rig"
+	E("Torso", "110684113028749"),
+	-- white limbs black torso rig
+	E("Head", "13058343355", nil, angles(0, 3.141592653589793, 0)),
+	E("Left Leg", "139733645770094", nil, angles(0, 0, 1.5707963267948966)),
+	E("Right Leg", "99608462237958", nil, angles(0, 0, 1.5707963267948966)),
+	E("Left Arm", "90736849096372", nil, angles(0, 0, 1.5707963267948966)),
+	E("Right Arm", "105141400603933", nil, angles(0, 0, 1.5707963267948966)),
+	-- head for black rigs
+	E("Head", "13953153289"),
+	-- lay offsale black rig
+	E("Left Leg", "17387586286", nil, angles(1.5707963267948966, 0, 1.5707963267948966)),
+	E("Right Leg", "17387586286", nil, angles(-1.5707963267948966, 0, 1.5707963267948966)),
+	E("Left Arm", "17374767929", nil, angles(1.5707963267948966, 0, 1.5707963267948966)),
+	E("Right Arm", "17374767929", nil, angles(-1.5707963267948966, 0, 1.5707963267948966)),
+	-- 7ws offsale black rig
+	E("Left Leg", "125405780718494", nil, angles(1.5707963267948966, 0, 1.5707963267948966)),
+	E("Right Leg", "125405780718494", nil, angles(-1.5707963267948966, 0, 1.5707963267948966)),
+	E("Left Arm", "125405780718494", nil, angles(1.5707963267948966, 0, 1.5707963267948966)),
+	E("Right Arm", "125405780718494", nil, angles(-1.5707963267948966, 0, 1.5707963267948966)),
+
+	-- meshless rig
+	E("Head", "13953094351"),
+	E("Torso", "127552124837034", nil, angles(0, 0, 1.5707963267948966)),
+	E("Left Leg", "121304376791439"),
+	E("Right Leg", "121304376791439"),
+	E("Left Arm", "117287001096396"),
+	E("Right Arm", "117287001096396"),
+
+	-- head for noob rig
+	E("Head", "13058309233", nil, angles(0, 3.141592653589793, 0)),
+	-- lay offsale noob rig
+	E("Torso", "18640899369"),
+	E("Left Leg", "18640901641"),
+	E("Right Leg", "18640901641"),
+	E("Left Arm", "18640914129"),
+	E("Right Arm", "18640914129"),
+	-- 7ws offsale noob rig
+	E("Torso", "126825022897778"),
+	E("Left Leg", nil, "73798034827573", angles(0, 0, 1.5707963267948966)),
+	E("Right Leg", nil, "73798034827573", angles(0, 0, 1.5707963267948966)),
+	E("Left Arm", nil, "135650240593878", angles(0, 0, 1.5707963267948966)),
+	E("Right Arm", nil, "135650240593878", angles(0, 0, 1.5707963267948966)),
+
+	-- white torso
+	E("Torso", "126825022897778"),
+
+	-- lay onsale gray torso white arm black leg rig
+	E("Torso", "139792224823925"),
+	E("Left Leg", "83395427313429", nil, angles(0, 0, 1.5707963267948966)),
+	E("Right Leg", "83395427313429", nil, angles(0, 0, 1.5707963267948966)),
+	E("Left Arm", "105263225400272", nil, angles(0, 0, 1.5707963267948966)),
+	E("Right Arm", "105263225400272", nil, angles(0, 0, 1.5707963267948966)),
+
+	-- shownape / geecee auto rig
+	E("Head", nil, nil, nil, "Accessory (autorig_Head)"),
+	E("Torso", nil, nil, nil, "Accessory (autorig_Torso)"),
+	E("Left Leg", nil, nil, nil, "Accessory (autorig_LeftLeg)"),
+	E("Right Leg", nil, nil, nil, "Accessory (autorig_RightLeg)"),
+	E("Left Arm", nil, nil, nil, "Accessory (autorig_LeftArm)"),
+	E("Right Arm", nil, nil, nil, "Accessory (autorig_RightArm)"),
+
+	-- free rig
+	E("Left Arm", "4324138105", "4324138210", angles(-1.6144295580947547, 1.5707963267948966, 0) * cf(-0.125, 0.3, 0)),
+	E("Left Arm", "4154474745", "4154474807", angles(1.5271630954950384, -1.5707963267948966, 0) * cf(-0.125, -0.3, 0)),
+	E("Right Arm", "3030546036", "3650191503", angles(1.5271630954950384, 1.5707963267948966, 0) * cf(0.125, -0.3, 0)),
+	E("Right Arm", "3030546036", "3443321249", angles(-1.6144295580947547, -1.5707963267948966, 0) * cf(0.125, 0.3, 0)),
+	E("Left Leg", "3030546036", "3360974849", angles(1.5271630954950384, 1.5707963267948966, 0) * cf(-0.125, -0.35, 0)),
+	E("Left Leg", "3030546036", "3360978739", angles(-1.6144295580947547, -1.5707963267948966, 0) * cf(-0.125, 0.3, 0)),
+	E("Right Leg", "3030546036", "3033898741", angles(1.5271630954950384, -1.5707963267948966, 0) * cf(0.125, -0.35, 0)),
+	E("Right Leg", "3030546036", "3409604993", angles(-1.6144295580947547, 1.5707963267948966, 0) * cf(0.125, 0.3, 0)),
+	E("Torso", "4819720316", "4819722776", angles(0, 0, 0.2617993877991494)),
+}
 end
 
 __defs["harness/driver"] = function(require)
@@ -2579,8 +2742,8 @@ function Overlay.new(opts)
 
 		local info = opts.getBodyInfo()
 		bodyLabel.Text = string.format(
-			"body: %s  state: %s  speed %g  jump %g  hip %g\ncamera zoom %.1f%s",
-			info.mode, info.state, info.walk, info.jump, info.hip, info.zoom, info.lock
+			"mode: %s   state: %s   physics: %s\nspeed %g  jump %g  hip %.1f  zoom %.1f%s",
+			info.modeName, info.state, info.mode, info.walk, info.jump, info.hip, info.zoom, info.lock
 		)
 
 		local entries = claim.entries
@@ -2601,8 +2764,9 @@ function Overlay.new(opts)
 				flag = " cap"
 			end
 			row.Text = string.format(
-				"%-9s %-16s %3d%% drops:%d reown:%.2fs%s",
-				STATE_LABEL[e.State] or e.State, string.sub(e.Name, 1, 16), pct, e.Drops, avg, flag
+				"%-8s %-13s %-11s %3d%% d:%d r:%.2f%s",
+				STATE_LABEL[e.State] or e.State, string.sub(e.Name, 1, 13), string.sub(e.BindLabel or "-", 1, 11),
+				pct, e.Drops, avg, flag
 			)
 			row.TextColor3 = STATE_COLOR[e.State] or Color3.new(1, 1, 1)
 		end
@@ -2646,8 +2810,8 @@ end
 
 __defs["init"] = function(require)
 -- init.lua
--- Wires config, input, camera, body, claim core, start-up strategies and the
--- test harness together.
+-- Wires config, input, camera, body, skeleton, binder, modes, claim core,
+-- start-up strategies and the test harness together.
 
 local Util = require("core/util")
 local Config = require("core/config")
@@ -2657,6 +2821,11 @@ local Netless = require("claim/netless")
 local Input = require("body/input")
 local CameraRig = require("body/camera")
 local Body = require("body/body")
+local Skeleton = require("skeleton/skeleton")
+local Binder = require("skeleton/binder")
+local Rigs = require("data/rigs")
+local Registry = require("modes/registry")
+local Builtin = require("modes/builtin")
 local Driver = require("harness/driver")
 local Overlay = require("harness/overlay")
 
@@ -2800,7 +2969,62 @@ function M.start(userCfg)
 		end,
 	})
 	local driver = Driver.new(cfg.Harness, body)
-	claim:SetProvider(driver:GetProvider())
+
+	----------------------------------------------------------------
+	-- skeleton, binder, modes
+	----------------------------------------------------------------
+	local skeleton = Skeleton.new()
+	local binder = Binder.new(cfg.Binder, skeleton, Rigs)
+	local modes = Registry.new(cfg.Modes, maid, {
+		body = body,
+		skeleton = skeleton,
+		getSlot = function(name)
+			return binder:GetSlot(name)
+		end,
+		base = cfg.Body,
+		onRegister = function(mode)
+			for slotName, def in pairs(mode.Slots) do
+				binder:DeclareSlot(slotName, def)
+			end
+			binder:Reresolve()
+		end,
+	})
+	maid:Give(modes.ModeChanged:Connect(function(new, old, reason)
+		local from = "-"
+		if old then
+			from = old.Name
+		end
+		claim:_log("mode " .. from .. " -> " .. new.Name .. " (" .. reason .. ")")
+	end))
+	if cfg.Modes.LoadBuiltin then
+		Builtin.register(modes)
+	end
+	if type(cfg.Modes.Register) == "function" then
+		local ok, err = pcall(cfg.Modes.Register, modes)
+		if not ok then
+			warn("[Exire] Modes.Register failed: " .. tostring(err))
+		end
+	end
+	modes:Start()
+
+	-- who tells the claim system where each hat goes
+	local targets = cfg.Targets
+	local formationProvider = driver:GetProvider()
+	local function rigProvider(entry, index, count, now)
+		local b = entry.Binding
+		if not b then
+			return nil
+		end
+		return b.Part.CF, body:GetVelocity()
+	end
+	local function applyTargets()
+		if targets == "formation" then
+			claim:SetProvider(formationProvider)
+		else
+			claim:SetProvider(rigProvider)
+		end
+	end
+	applyTargets()
 
 	----------------------------------------------------------------
 	-- character bring-up (initial character and every respawn)
@@ -2894,6 +3118,10 @@ function M.start(userCfg)
 	end)
 	maid:Give(RunService.Heartbeat:Connect(function(dt)
 		body:Step(dt)
+		skeleton:SetRoot(body:GetCF())
+		binder:Step(claim.entries)
+		modes:Update(dt)
+		skeleton:Refresh()
 		ghostReal()
 		claim:Step(dt)
 	end))
@@ -2919,26 +3147,35 @@ function M.start(userCfg)
 		},
 		{
 			text = function()
-				return "walkspeed: " .. tostring(body.walkSpeed)
+				local cur = modes:GetCurrent()
+				if cur then
+					return "mode: " .. cur.Name .. " (next)"
+				end
+				return "mode: -"
 			end,
 			run = function()
-				body:SetWalkSpeed(Util.cycle({ 16, 30, 60, 100 }, body.walkSpeed))
+				modes:Next("api")
 			end,
 		},
 		{
 			text = function()
-				return "jump power: " .. tostring(body.jumpPower)
+				return "default mode: " .. onOff(cfg.Modes.DefaultMode.Enabled)
 			end,
 			run = function()
-				body:SetJumpPower(Util.cycle({ 50, 80, 120 }, body.jumpPower))
+				cfg.Modes.DefaultMode.Enabled = not cfg.Modes.DefaultMode.Enabled
 			end,
 		},
 		{
 			text = function()
-				return "hip height: " .. tostring(body.hipHeight)
+				return "hat targets: " .. targets
 			end,
 			run = function()
-				body:SetHipHeight(Util.cycle({ 0, 4, 10 }, body.hipHeight))
+				if targets == "rig" then
+					targets = "formation"
+				else
+					targets = "rig"
+				end
+				applyTargets()
 			end,
 		},
 		{
@@ -3041,7 +3278,16 @@ function M.start(userCfg)
 			if camRig.Shiftlock then
 				lock = "  [shift lock]"
 			end
+			local cur = modes:GetCurrent()
+			local modeName = "-"
+			if cur then
+				modeName = cur.Name
+				if cur.Key then
+					modeName = modeName .. " [" .. tostring(cur.Key) .. "]"
+				end
+			end
 			return {
+				modeName = modeName,
 				mode = body.mode,
 				state = body:GetState(),
 				walk = body.walkSpeed,
@@ -3085,6 +3331,9 @@ function M.start(userCfg)
 	api.Camera = camRig
 	api.Input = input
 	api.Driver = driver
+	api.Modes = modes
+	api.Skeleton = skeleton
+	api.Binder = binder
 	env.ExireReanimate = api
 	return api
 end
@@ -3099,6 +3348,1079 @@ local Exire = require("init")
 
 local env = Util.getEnv()
 return Exire.start(env.ExireConfig)
+end
+
+__defs["modes/builtin"] = function(require)
+-- modes/builtin.lua
+-- Two small modes that exercise the whole system: a plain walking "Default"
+-- (the fallback every other mode inherits from) and "Hover", which shows
+-- per-state HipHeight (the camera rides the hip height) and WalkSpeed.
+--
+-- Joint maths reminder (R6): shoulders and hips swing around the joint's local
+-- Z axis. With the same angle on both sides the right limb goes forward when
+-- the left goes back, so a walk cycle is: shoulders +s, hips -s.
+-- Root and neck: a positive local-X angle leans forward.
+
+local Builtin = {}
+
+local function pose(ctx, jointName, offset, rate)
+	local joint = ctx.Joints[jointName]
+	joint.C0 = joint.C0:Lerp(joint.RestC0 * offset, ctx.alpha(rate))
+end
+
+local function flatSpeed(ctx)
+	local v = ctx.Velocity
+	return Vector3.new(v.X, 0, v.Z).Magnitude
+end
+
+function Builtin.register(registry)
+	registry:Register({
+		Id = "default",
+		Name = "Default",
+		Meta = { Color = Color3.fromRGB(255, 255, 255), Description = "Plain walking pose" },
+		WalkSpeed = 30,
+		JumpPower = 50,
+		HipHeight = 0,
+		States = {
+			idle = function(ctx)
+				local b = math.sin(ctx.t * 1.6)
+				pose(ctx, "RootJoint", CFrame.Angles(0.02 * b, 0, 0), 8)
+				pose(ctx, "Neck", CFrame.Angles(-0.03 * b, 0, 0), 8)
+				pose(ctx, "Right Shoulder", CFrame.Angles(0, 0, 0.05 * b), 8)
+				pose(ctx, "Left Shoulder", CFrame.Angles(0, 0, -0.05 * b), 8)
+				pose(ctx, "Right Hip", CFrame.new(), 8)
+				pose(ctx, "Left Hip", CFrame.new(), 8)
+			end,
+			walk = function(ctx)
+				local speed = flatSpeed(ctx)
+				local amp = math.clamp(speed / math.max(ctx.WalkSpeed, 1), 0, 1.2)
+				local s = math.sin(ctx.t * (4 + speed * 0.22)) * 0.9 * amp
+				pose(ctx, "RootJoint", CFrame.Angles(0.12 * amp, 0, 0), 10)
+				pose(ctx, "Neck", CFrame.Angles(-0.1 * amp, 0, 0), 10)
+				pose(ctx, "Right Shoulder", CFrame.Angles(0, 0, s), 14)
+				pose(ctx, "Left Shoulder", CFrame.Angles(0, 0, s), 14)
+				pose(ctx, "Right Hip", CFrame.Angles(0, 0, -s), 14)
+				pose(ctx, "Left Hip", CFrame.Angles(0, 0, -s), 14)
+			end,
+			jump = function(ctx)
+				pose(ctx, "RootJoint", CFrame.Angles(0.05, 0, 0), 10)
+				pose(ctx, "Neck", CFrame.new(), 10)
+				pose(ctx, "Right Shoulder", CFrame.Angles(0, 0, 0.9), 12)
+				pose(ctx, "Left Shoulder", CFrame.Angles(0, 0, -0.9), 12)
+				pose(ctx, "Right Hip", CFrame.Angles(0, 0, 0.3), 12)
+				pose(ctx, "Left Hip", CFrame.Angles(0, 0, -0.3), 12)
+			end,
+			fall = function(ctx)
+				pose(ctx, "RootJoint", CFrame.Angles(0.08, 0, 0), 8)
+				pose(ctx, "Neck", CFrame.Angles(-0.1, 0, 0), 8)
+				pose(ctx, "Right Shoulder", CFrame.Angles(0, 0, 0.5), 8)
+				pose(ctx, "Left Shoulder", CFrame.Angles(0, 0, -0.5), 8)
+				pose(ctx, "Right Hip", CFrame.Angles(0, 0, 0.15), 8)
+				pose(ctx, "Left Hip", CFrame.Angles(0, 0, -0.15), 8)
+			end,
+		},
+	})
+
+	-- every state needs the same relaxed floating pose; only the hip heights differ
+	local function hoverPose(ctx)
+		local bob = math.sin(ctx.t * 2)
+		local speed = flatSpeed(ctx)
+		local lean = math.clamp(speed / math.max(ctx.WalkSpeed, 1), 0, 1) * 0.35
+		-- the vertical bob is a purely visual offset: the camera ignores it
+		local rootJoint = ctx.Joints.RootJoint
+		rootJoint.C0 = rootJoint.C0:Lerp(rootJoint.RestC0 * CFrame.new(0, 0.3 * bob, 0) * CFrame.Angles(lean, 0, 0), ctx.alpha(8))
+		pose(ctx, "Neck", CFrame.Angles(-lean * 0.6, 0, 0), 8)
+		pose(ctx, "Right Shoulder", CFrame.Angles(0, 0, 0.25 + 0.05 * bob), 6)
+		pose(ctx, "Left Shoulder", CFrame.Angles(0, 0, -0.25 - 0.05 * bob), 6)
+		pose(ctx, "Right Hip", CFrame.Angles(0, 0, -0.12), 6)
+		pose(ctx, "Left Hip", CFrame.Angles(0, 0, 0.12), 6)
+	end
+
+	registry:Register({
+		Id = "hover",
+		Name = "Hover",
+		Key = "H",
+		Meta = { Color = Color3.fromRGB(120, 200, 255), Description = "Floats 8 studs up; hip height changes per state" },
+		WalkSpeed = 40,
+		JumpPower = 55,
+		HipHeight = 8,
+		States = {
+			idle = { HipHeight = 8, Update = hoverPose },
+			walk = { HipHeight = 7, Update = hoverPose },
+			jump = { HipHeight = 11, Update = hoverPose },
+			fall = { HipHeight = 11, Update = hoverPose },
+		},
+	})
+end
+
+return Builtin
+end
+
+__defs["modes/registry"] = function(require)
+-- modes/registry.lua
+-- Modes work like Patchma's addmode (idle / walk / jump / fall, missing states
+-- inherit from the default mode) with these differences:
+--   * WalkSpeed, JumpPower and HipHeight are declared on the mode and can be
+--     overridden per state (HipHeight eases between states, and because the
+--     camera pivots on the root it follows the current state's hip height)
+--   * a mode has an Id, Name, Key and a Meta table, and the registry fires
+--     ModeChanged / StateChanged, so a HUD never has to detect keybinds
+--   * the default mode can be turned off (Settings: Modes.DefaultMode.Enabled)
+--
+-- Mode definition:
+--   { Id, Name, Key, Meta, WalkSpeed, JumpPower, HipHeight, Toggle, ResetPose,
+--     Slots = { SlotName = { {mesh=, tex=, name=}, ... } },
+--     States = { idle = fn | { Update = fn, HipHeight =, WalkSpeed =, JumpPower = }, walk, jump, fall },
+--     OnEnter = fn(ctx), OnLeave = fn(ctx) }
+-- States may also be given Patchma-style directly on the definition: idle = fn.
+
+local Util = require("core/util")
+
+local UserInputService = game:GetService("UserInputService")
+
+local Registry = {}
+Registry.__index = Registry
+
+local STATES = { "idle", "walk", "jump", "fall" }
+
+-- inside one mode, a missing state falls back to these (in order)
+local INMODE_FALLBACK = {
+	idle = {},
+	walk = { "idle" },
+	jump = { "fall", "idle" },
+	fall = { "idle" },
+}
+
+local DIGITS = {
+	["0"] = "Zero", ["1"] = "One", ["2"] = "Two", ["3"] = "Three", ["4"] = "Four",
+	["5"] = "Five", ["6"] = "Six", ["7"] = "Seven", ["8"] = "Eight", ["9"] = "Nine",
+}
+
+local function keyCodeOf(key)
+	if key == nil then
+		return nil
+	end
+	if typeof(key) == "EnumItem" then
+		return key
+	end
+	if type(key) == "string" then
+		local name = DIGITS[key] or string.upper(key)
+		local ok, kc = pcall(function()
+			return Enum.KeyCode[name]
+		end)
+		if ok and kc then
+			return kc
+		end
+		ok, kc = pcall(function()
+			return Enum.KeyCode[key]
+		end)
+		if ok and kc then
+			return kc
+		end
+	end
+	return nil
+end
+
+local NULL_SLOT = {
+	Dummy = true,
+	Offset = CFrame.new(),
+	SetOffset = function() end,
+	SetParent = function() end,
+	GetCF = function()
+		return CFrame.new()
+	end,
+	IsBound = function()
+		return false
+	end,
+}
+
+----------------------------------------------------------------------
+-- the ctx table handed to every mode function
+----------------------------------------------------------------------
+local function makeCtx(self)
+	local skeleton = self.skeleton
+	local warned = {}
+	local ctx = {}
+
+	ctx.Joints = setmetatable({}, {
+		__index = function(_, name)
+			local joint = skeleton:GetJoint(name)
+			if joint then
+				return joint
+			end
+			if not warned["j" .. tostring(name)] then
+				warned["j" .. tostring(name)] = true
+				warn("[Exire] unknown joint '" .. tostring(name) .. "' (valid: RootJoint, Neck, Left Shoulder, Right Shoulder, Left Hip, Right Hip)")
+			end
+			return { Dummy = true, C0 = CFrame.new(), C1 = CFrame.new(), RestC0 = CFrame.new(), RestC1 = CFrame.new() }
+		end,
+	})
+
+	ctx.Slots = setmetatable({}, {
+		__index = function(_, name)
+			local slot = self.getSlot(name)
+			if slot then
+				return slot
+			end
+			if not warned["s" .. tostring(name)] then
+				warned["s" .. tostring(name)] = true
+				warn("[Exire] unknown slot '" .. tostring(name) .. "': declare it in the mode's Slots table")
+			end
+			return NULL_SLOT
+		end,
+	})
+
+	ctx.dt = 0
+	ctx.t = 0
+	ctx.sine = os.clock()
+	ctx.deltaTime = 0
+	ctx.State = "idle"
+	ctx.Velocity = Vector3.zero
+	ctx.Facing = CFrame.new()
+	ctx.WalkSpeed = 30
+	ctx.Mode = nil
+
+	-- framerate-independent lerp alpha for a given rate (per second)
+	function ctx.alpha(rate)
+		return 1 - math.exp(-rate * ctx.dt)
+	end
+
+	function ctx.lerp(joint, target, alpha)
+		joint.C0 = joint.C0:Lerp(target, alpha)
+	end
+
+	-- ease a joint back to its rest pose
+	function ctx.rest(name, alpha)
+		local joint = ctx.Joints[name]
+		if joint.RestC0 then
+			joint.C0 = joint.C0:Lerp(joint.RestC0, alpha)
+		end
+	end
+
+	-- forward / right speed relative to the body's facing, as a fraction of walk speed
+	function ctx.moveFR()
+		local v = ctx.Velocity
+		local flat = Vector3.new(v.X, 0, v.Z)
+		local speed = math.max(ctx.WalkSpeed, 1)
+		local cf = ctx.Facing
+		local fw = flat:Dot(cf.LookVector) / speed
+		local rt = flat:Dot(cf.RightVector) / speed
+		return math.clamp(fw, -1.5, 1.5), math.clamp(rt, -1.5, 1.5)
+	end
+
+	return ctx
+end
+
+----------------------------------------------------------------------
+-- registry
+----------------------------------------------------------------------
+-- cfg = Config.Modes
+-- deps = { body, skeleton, getSlot(name), base = { WalkSpeed, JumpPower, HipHeight }, onRegister(mode) }
+function Registry.new(cfg, maid, deps)
+	local self = setmetatable({}, Registry)
+	self.cfg = cfg
+	self.body = deps.body
+	self.skeleton = deps.skeleton
+	self.getSlot = deps.getSlot
+	self.base = deps.base
+	self.onRegister = deps.onRegister
+	self.modes = {}
+	self.order = {}
+	self.byKey = {}
+	self.default = nil
+	self.current = nil
+	self.started = false
+	self.state = "idle"
+	self.hip = deps.base.HipHeight
+	self.t0 = os.clock()
+	self._errors = {}
+	self.ModeChanged = Util.Signal.new()
+	self.StateChanged = Util.Signal.new()
+	self.Registered = Util.Signal.new()
+	self.ctx = makeCtx(self)
+
+	maid:Give(UserInputService.InputBegan:Connect(function(input, gpe)
+		if input.UserInputType ~= Enum.UserInputType.Keyboard then
+			return
+		end
+		if UserInputService:GetFocusedTextBox() then
+			return
+		end
+		self:HandleKey(input.KeyCode)
+	end))
+	return self
+end
+
+function Registry:_defaultOn()
+	return self.cfg.DefaultMode.Enabled and self.default ~= nil
+end
+
+function Registry:Register(def)
+	if type(def) ~= "table" or type(def.Id) ~= "string" then
+		warn("[Exire] a mode needs a string Id")
+		return nil
+	end
+	local mode = {
+		Id = def.Id,
+		Name = def.Name or def.Id,
+		Key = def.Key,
+		KeyCode = keyCodeOf(def.Key),
+		Meta = def.Meta or {},
+		WalkSpeed = def.WalkSpeed,
+		JumpPower = def.JumpPower,
+		HipHeight = def.HipHeight,
+		Toggle = def.Toggle,
+		ResetPose = def.ResetPose,
+		Slots = def.Slots,
+		OnEnter = def.OnEnter,
+		OnLeave = def.OnLeave,
+		States = {},
+	}
+	for state, v in pairs(def.States or {}) do
+		if type(v) == "function" then
+			mode.States[state] = { Update = v }
+		elseif type(v) == "table" then
+			mode.States[state] = v
+		end
+	end
+	for _, state in ipairs(STATES) do
+		if mode.States[state] == nil and type(def[state]) == "function" then
+			mode.States[state] = { Update = def[state] }
+		end
+	end
+	mode.Public = {
+		Id = mode.Id,
+		Name = mode.Name,
+		Key = mode.Key,
+		Meta = mode.Meta,
+		WalkSpeed = mode.WalkSpeed,
+		JumpPower = mode.JumpPower,
+		HipHeight = mode.HipHeight,
+	}
+	if def.Key ~= nil and not mode.KeyCode then
+		warn("[Exire] mode '" .. mode.Id .. "': unknown key '" .. tostring(def.Key) .. "'")
+	end
+
+	if self.modes[mode.Id] then
+		for i = 1, #self.order do
+			if self.order[i].Id == mode.Id then
+				self.order[i] = mode
+				break
+			end
+		end
+	else
+		self.order[#self.order + 1] = mode
+	end
+	self.modes[mode.Id] = mode
+	if mode.Id == self.cfg.DefaultMode.Id then
+		self.default = mode
+	end
+	if mode.KeyCode then
+		local other = self.byKey[mode.KeyCode]
+		if other and other ~= mode then
+			warn("[Exire] key " .. tostring(mode.Key) .. " is now '" .. mode.Id .. "' (was '" .. other.Id .. "')")
+		end
+		self.byKey[mode.KeyCode] = mode
+	end
+	if mode.Slots and self.onRegister then
+		self.onRegister(mode)
+	end
+	self.Registered:Fire(mode.Public)
+	if self.started and not self.current then
+		self:Start()
+	end
+	return mode.Public
+end
+
+function Registry:Start()
+	self.started = true
+	if self:_defaultOn() then
+		self:Set(self.default.Id, "start")
+		return
+	end
+	local mode = nil
+	if self.cfg.StartMode then
+		mode = self.modes[self.cfg.StartMode]
+	end
+	if not mode then
+		mode = self.order[1]
+	end
+	if mode then
+		self:Set(mode.Id, "start")
+	end
+end
+
+function Registry:Set(id, reason)
+	local mode = self.modes[id]
+	if not mode then
+		warn("[Exire] unknown mode '" .. tostring(id) .. "'")
+		return false
+	end
+	if mode == self.current then
+		return true
+	end
+	local old = self.current
+	if old and old.OnLeave then
+		pcall(old.OnLeave, self.ctx)
+	end
+	self.current = mode
+	if mode.ResetPose == true or (mode.ResetPose == nil and self.cfg.ResetPoseOnSwitch) then
+		self.skeleton:ResetPose()
+	end
+	if mode.OnEnter then
+		pcall(mode.OnEnter, self.ctx)
+	end
+	local oldPublic = nil
+	if old then
+		oldPublic = old.Public
+	end
+	self.ModeChanged:Fire(mode.Public, oldPublic, reason or "api")
+	return true
+end
+
+-- cycle through every registered mode
+function Registry:Next(reason)
+	if #self.order == 0 then
+		return
+	end
+	local index = 0
+	for i = 1, #self.order do
+		if self.order[i] == self.current then
+			index = i
+		end
+	end
+	local nextMode = self.order[(index % #self.order) + 1]
+	self:Set(nextMode.Id, reason or "api")
+end
+
+function Registry:HandleKey(keyCode)
+	local mode = self.byKey[keyCode]
+	if not mode then
+		return
+	end
+	if mode == self.current then
+		if mode.Toggle == false then
+			return
+		end
+		if self:_defaultOn() and self.default ~= mode then
+			self:Set(self.default.Id, "key")
+		end
+		return
+	end
+	self:Set(mode.Id, "key")
+end
+
+function Registry:GetCurrent()
+	if self.current then
+		return self.current.Public
+	end
+	return nil
+end
+
+function Registry:List()
+	local out = {}
+	for i = 1, #self.order do
+		out[i] = self.order[i].Public
+	end
+	return out
+end
+
+-- which state definition runs, and which one supplies per-state stats
+function Registry:_resolveState(mode, state)
+	local exact = mode.States[state]
+	if exact then
+		return exact, exact
+	end
+	if self:_defaultOn() and self.default ~= mode then
+		local d = self.default.States[state]
+		if d then
+			return d, nil
+		end
+	end
+	local chain = INMODE_FALLBACK[state] or {}
+	for i = 1, #chain do
+		local f = mode.States[chain[i]]
+		if f then
+			return f, f
+		end
+	end
+	return nil, nil
+end
+
+-- state value -> mode value -> default's state -> default -> base
+function Registry:_stat(mode, statDef, state, name)
+	if statDef and statDef[name] ~= nil then
+		return statDef[name]
+	end
+	if mode[name] ~= nil then
+		return mode[name]
+	end
+	if self:_defaultOn() and self.default ~= mode then
+		local ds = self.default.States[state]
+		if ds and ds[name] ~= nil then
+			return ds[name]
+		end
+		if self.default[name] ~= nil then
+			return self.default[name]
+		end
+	end
+	return self.base[name]
+end
+
+function Registry:_report(mode, state, err)
+	local key = mode.Id .. "/" .. state .. ": " .. tostring(err)
+	local n = (self._errors[key] or 0) + 1
+	self._errors[key] = n
+	if n == 1 or n % 256 == 0 then
+		warn("[Exire] mode '" .. mode.Id .. "' (" .. state .. ") error x" .. n .. ": " .. tostring(err))
+	end
+end
+
+function Registry:Update(dt)
+	local mode = self.current
+	if not mode then
+		return
+	end
+	local body = self.body
+	local state = body:GetState()
+	if state ~= self.state then
+		self.state = state
+		self.StateChanged:Fire(state)
+	end
+
+	local ctx = self.ctx
+	local now = os.clock()
+	ctx.dt = dt
+	ctx.t = now - self.t0
+	ctx.sine = now
+	ctx.deltaTime = math.min(dt * 10, 1)
+	ctx.State = state
+	ctx.Velocity = body:GetVelocity()
+	ctx.Facing = body:GetCF()
+	ctx.WalkSpeed = body.walkSpeed
+	ctx.Mode = mode.Public
+
+	local def, statDef = self:_resolveState(mode, state)
+	local walk = self:_stat(mode, statDef, state, "WalkSpeed")
+	local jump = self:_stat(mode, statDef, state, "JumpPower")
+	local hipTarget = self:_stat(mode, statDef, state, "HipHeight")
+
+	if body.walkSpeed ~= walk then
+		body:SetWalkSpeed(walk)
+	end
+	if body.jumpPower ~= jump then
+		body:SetJumpPower(jump)
+	end
+	local a = 1 - math.exp(-self.cfg.HipBlend * dt)
+	self.hip = self.hip + (hipTarget - self.hip) * a
+	if math.abs(self.hip - hipTarget) < 0.001 then
+		self.hip = hipTarget
+	end
+	if body.hipHeight ~= self.hip then
+		body:SetHipHeight(self.hip)
+	end
+
+	if def and def.Update then
+		local ok, err = pcall(def.Update, ctx)
+		if not ok then
+			self:_report(mode, state, err)
+		end
+	end
+end
+
+return Registry
+end
+
+__defs["skeleton/binder"] = function(require)
+-- skeleton/binder.lua
+-- Decides which virtual part every claimed hat follows. Order of rules:
+--   1. mode slots     named slots a mode declared, matched by a list of
+--                     { mesh, tex, name } candidates (any field may be nil)
+--   2. rig database   data/rigs.lua (hat-built R6 rigs), each entry used once
+--   3. attachments    the hat's own Attachment (Hat, Hair, Face, Shoulder, ...)
+--   4. park           next to the body, so the hat is still claimed
+-- Every binding is a virtual part joined to a limb; the claim system just
+-- reads that part's CFrame each frame.
+--
+-- Offsets are expressed as  handle = limb * offset.  The joint stores the
+-- inverse in C0 (C1 stays identity), matching the skeleton's formula.
+
+local Binder = {}
+Binder.__index = Binder
+
+-- standard R6 attachments: name -> { limb, CFrame on the limb }
+local ATTACHMENTS = {
+	RightShoulderAttachment = { "Right Arm", CFrame.new(0, 1, 0) },
+	RightGripAttachment = { "Right Arm", CFrame.new(0, -1, 0) },
+	LeftFootAttachment = { "Left Leg", CFrame.new(0, -1, 0) },
+	LeftShoulderAttachment = { "Left Arm", CFrame.new(0, 1, 0) },
+	LeftGripAttachment = { "Left Arm", CFrame.new(0, -1, 0) },
+	RootAttachment = { "HumanoidRootPart", CFrame.new(0, 0, 0) },
+	RightFootAttachment = { "Right Leg", CFrame.new(0, -1, 0) },
+	NeckAttachment = { "Torso", CFrame.new(0, 1, 0) },
+	BodyFrontAttachment = { "Torso", CFrame.new(0, 0, -0.5) },
+	BodyBackAttachment = { "Torso", CFrame.new(0, 0, 0.5) },
+	LeftCollarAttachment = { "Torso", CFrame.new(-1, 1, 0) },
+	RightCollarAttachment = { "Torso", CFrame.new(1, 1, 0) },
+	WaistFrontAttachment = { "Torso", CFrame.new(0, -1, -0.5) },
+	WaistCenterAttachment = { "Torso", CFrame.new(0, -1, 0) },
+	WaistBackAttachment = { "Torso", CFrame.new(0, -1, 0.5) },
+	HairAttachment = { "Head", CFrame.new(0, 0.6, 0) },
+	HatAttachment = { "Head", CFrame.new(0, 0.6, 0) },
+	FaceFrontAttachment = { "Head", CFrame.new(0, 0, -0.6) },
+	FaceCenterAttachment = { "Head", CFrame.new(0, 0, 0) },
+}
+
+----------------------------------------------------------------------
+-- matching
+----------------------------------------------------------------------
+-- digits of an asset reference; numbers are formatted without exponent
+local function assetId(v)
+	if v == nil then
+		return nil
+	end
+	if type(v) == "number" then
+		return string.format("%.0f", v)
+	end
+	local s = tostring(v)
+	return string.match(s, "id=(%d+)") or string.match(s, "rbxassetid://(%d+)") or string.match(s, "^(%d+)$")
+end
+
+-- every field that is set must match; a candidate with no fields matches nothing
+local function matches(entry, c)
+	local any = false
+	if c.mesh ~= nil and c.mesh ~= "" then
+		any = true
+		if assetId(entry.Mesh) ~= assetId(c.mesh) then
+			return false
+		end
+	end
+	if c.tex ~= nil and c.tex ~= "" then
+		any = true
+		if assetId(entry.Tex) ~= assetId(c.tex) then
+			return false
+		end
+	end
+	if c.name ~= nil then
+		any = true
+		if entry.Name ~= c.name then
+			return false
+		end
+	end
+	return any
+end
+
+local function toCandidates(def)
+	if def.Candidates then
+		return def.Candidates
+	end
+	if def.mesh ~= nil or def.tex ~= nil or def.name ~= nil then
+		return { def }
+	end
+	return def
+end
+
+----------------------------------------------------------------------
+-- slots (what modes see)
+----------------------------------------------------------------------
+local Slot = {}
+Slot.__index = Slot
+
+-- handle = parent limb * offset (optionally eased towards it with alpha)
+function Slot:SetOffset(cf, alpha)
+	if alpha then
+		cf = self.Offset:Lerp(cf, alpha)
+	end
+	self.Offset = cf
+	self.Joint.C0 = cf:Inverse()
+end
+
+function Slot:SetParent(limbName)
+	if limbName == self.Parent then
+		return
+	end
+	local limb = self.binder.skeleton:GetPart(limbName)
+	if not limb then
+		warn("[Exire] slot '" .. self.Name .. "': unknown limb '" .. tostring(limbName) .. "'")
+		return
+	end
+	self.Parent = limbName
+	self.binder.skeleton:SetJointPart1(self.Joint, limb)
+end
+
+function Slot:GetCF()
+	return self.Part.CF
+end
+
+function Slot:IsBound()
+	return self.Entry ~= nil
+end
+
+----------------------------------------------------------------------
+-- binder
+----------------------------------------------------------------------
+-- cfg = Config.Binder, db = data/rigs.lua
+function Binder.new(cfg, skeleton, db)
+	local self = setmetatable({}, Binder)
+	self.cfg = cfg
+	self.skeleton = skeleton
+	self.db = db or {}
+	self.slots = {}
+	self.slotOrder = {}
+	self.bindings = {}
+	self.used = {}
+	return self
+end
+
+function Binder:GetSlot(name)
+	return self.slots[name]
+end
+
+-- def: array of candidates, a single candidate, or { Candidates, Parent, Offset }
+function Binder:DeclareSlot(name, def)
+	local cands = toCandidates(def)
+	local slot = self.slots[name]
+	if slot then
+		for _, c in ipairs(cands) do
+			slot.Candidates[#slot.Candidates + 1] = c
+		end
+		return slot
+	end
+	local parentName = def.Parent or "HumanoidRootPart"
+	local limb = self.skeleton:GetPart(parentName)
+	if not limb then
+		warn("[Exire] slot '" .. name .. "': unknown parent '" .. tostring(parentName) .. "', using HumanoidRootPart")
+		parentName = "HumanoidRootPart"
+		limb = self.skeleton:GetPart(parentName)
+	end
+	local part = self.skeleton:AddPart("Slot:" .. name)
+	local joint = self.skeleton:AddJoint("Slot:" .. name, part, limb, CFrame.new(), CFrame.new())
+	slot = setmetatable({
+		Name = name,
+		Candidates = {},
+		Part = part,
+		Joint = joint,
+		Entry = nil,
+		Parent = parentName,
+		Offset = CFrame.new(),
+		binder = self,
+	}, Slot)
+	for _, c in ipairs(cands) do
+		slot.Candidates[#slot.Candidates + 1] = c
+	end
+	self.slots[name] = slot
+	self.slotOrder[#self.slotOrder + 1] = slot
+	if def.Offset then
+		slot:SetOffset(def.Offset)
+	end
+	return slot
+end
+
+function Binder:_bindSlot(entry, slot)
+	slot.Entry = entry
+	local b = {
+		Kind = "slot",
+		Label = "slot " .. slot.Name,
+		Part = slot.Part,
+		Slot = slot,
+		Entry = entry,
+	}
+	entry.Binding = b
+	entry.BindLabel = b.Label
+	self.bindings[#self.bindings + 1] = b
+end
+
+function Binder:_bindLimb(entry, kind, label, limbName, offset, dbEntry)
+	local limb = self.skeleton:GetPart(limbName)
+	if not limb then
+		return
+	end
+	local part = self.skeleton:AddPart("Hat:" .. entry.Name)
+	local joint = self.skeleton:AddJoint("Hat:" .. entry.Name, part, limb, offset:Inverse(), CFrame.new())
+	local b = {
+		Kind = kind,
+		Label = label,
+		Part = part,
+		Joint = joint,
+		Limb = limb,
+		Offset = offset,
+		Entry = entry,
+		Db = dbEntry,
+	}
+	entry.Binding = b
+	entry.BindLabel = label
+	self.bindings[#self.bindings + 1] = b
+end
+
+function Binder:_resolve(entry)
+	-- 1. slots declared by modes
+	for i = 1, #self.slotOrder do
+		local slot = self.slotOrder[i]
+		if not slot.Entry then
+			for _, c in ipairs(slot.Candidates) do
+				if matches(entry, c) then
+					self:_bindSlot(entry, slot)
+					return
+				end
+			end
+		end
+	end
+	-- 2. rig database
+	if self.cfg.UseRigDb then
+		for i = 1, #self.db do
+			local d = self.db[i]
+			if not self.used[d] and matches(entry, d) then
+				self.used[d] = true
+				self:_bindLimb(entry, "rig", "rig " .. d.Part, d.Part, d.C0:Inverse(), d)
+				return
+			end
+		end
+	end
+	-- 3. the hat's own attachment
+	if self.cfg.UseAttachments and entry.Handle then
+		for _, child in ipairs(entry.Handle:GetChildren()) do
+			if child:IsA("Attachment") then
+				local a = ATTACHMENTS[child.Name]
+				if a then
+					self:_bindLimb(entry, "att", "att " .. a[1], a[1], a[2] * child.CFrame:Inverse())
+					return
+				end
+			end
+		end
+	end
+	-- 4. park next to the body
+	if self.cfg.ParkUnknown then
+		self:_bindLimb(entry, "park", "park", "HumanoidRootPart", CFrame.new(0, 4, 3))
+	end
+end
+
+function Binder:_unbind(index)
+	local b = self.bindings[index]
+	if b.Kind == "slot" then
+		if b.Slot.Entry == b.Entry then
+			b.Slot.Entry = nil
+		end
+	else
+		self.skeleton:RemovePart(b.Part)
+		if b.Db then
+			self.used[b.Db] = nil
+		end
+	end
+	if b.Entry.Binding == b then
+		b.Entry.Binding = nil
+		b.Entry.BindLabel = nil
+	end
+	table.remove(self.bindings, index)
+end
+
+-- forget every non-slot binding so the next Step resolves them again
+-- (call after declaring new slots)
+function Binder:Reresolve()
+	for i = #self.bindings, 1, -1 do
+		if self.bindings[i].Kind ~= "slot" then
+			self:_unbind(i)
+		end
+	end
+	table.clear(self.used)
+end
+
+-- entries = Claim.entries
+function Binder:Step(entries)
+	for i = #self.bindings, 1, -1 do
+		if self.bindings[i].Entry.Removed then
+			self:_unbind(i)
+		end
+	end
+	for i = 1, #entries do
+		local e = entries[i]
+		if e.Handle and not e.Binding then
+			self:_resolve(e)
+		end
+	end
+end
+
+return Binder
+end
+
+__defs["skeleton/skeleton"] = function(require)
+-- skeleton/skeleton.lua
+-- Patchma-style virtual rig: no instances, just parts ({ Name, CF }) and joints
+-- ({ Name, Part0, Part1, C0, C1 }). Forward kinematics runs from the root every
+-- frame, so modes animate by editing joint C0 values and everything else
+-- (hat targets, VFX anchors, camera) reads the resulting part CFrames.
+--
+-- Body joints follow Motor6D semantics:  Part1 = Part0 * C0 * C1:Inverse()
+-- Accessory / slot joints are built the same way by the binder, with
+--   Part0 = the accessory part, Part1 = the limb,
+-- so the limb-side formula applies:       Part0 = Part1 * C1 * C0:Inverse()
+
+local Skeleton = {}
+Skeleton.__index = Skeleton
+
+local ROOT_C = CFrame.new(0, 0, 0, -1, 0, 0, 0, 0, 1, 0, 1, 0)
+local NECK_C0 = CFrame.new(0, 1, 0, -1, 0, 0, 0, 0, 1, 0, 1, 0)
+local NECK_C1 = CFrame.new(0, -0.5, 0, -1, 0, 0, 0, 0, 1, 0, 1, 0)
+local LSH_C0 = CFrame.new(-1, 0.5, 0, 0, 0, -1, 0, 1, 0, 1, 0, 0)
+local LSH_C1 = CFrame.new(0.5, 0.5, 0, 0, 0, -1, 0, 1, 0, 1, 0, 0)
+local RSH_C0 = CFrame.new(1, 0.5, 0, 0, 0, 1, 0, 1, 0, -1, 0, 0)
+local RSH_C1 = CFrame.new(-0.5, 0.5, 0, 0, 0, 1, 0, 1, 0, -1, 0, 0)
+local LHIP_C0 = CFrame.new(-1, -1, 0, 0, 0, -1, 0, 1, 0, 1, 0, 0)
+local LHIP_C1 = CFrame.new(-0.5, 1, 0, 0, 0, -1, 0, 1, 0, 1, 0, 0)
+local RHIP_C0 = CFrame.new(1, -1, 0, 0, 0, 1, 0, 1, 0, -1, 0, 0)
+local RHIP_C1 = CFrame.new(0.5, 1, 0, 0, 0, 1, 0, 1, 0, -1, 0, 0)
+
+local PART_NAMES = { "HumanoidRootPart", "Torso", "Head", "Left Arm", "Right Arm", "Left Leg", "Right Leg" }
+
+-- { joint name, Part0, Part1, C0, C1 }
+local R6_JOINTS = {
+	{ "RootJoint", "HumanoidRootPart", "Torso", ROOT_C, ROOT_C },
+	{ "Neck", "Torso", "Head", NECK_C0, NECK_C1 },
+	{ "Left Shoulder", "Torso", "Left Arm", LSH_C0, LSH_C1 },
+	{ "Right Shoulder", "Torso", "Right Arm", RSH_C0, RSH_C1 },
+	{ "Left Hip", "Torso", "Left Leg", LHIP_C0, LHIP_C1 },
+	{ "Right Hip", "Torso", "Right Leg", RHIP_C0, RHIP_C1 },
+}
+
+function Skeleton.new()
+	local self = setmetatable({}, Skeleton)
+	self.parts = {}
+	self.joints = {}
+	self.named = {}
+	self._adj = {}
+	self._dirty = true
+	self._stack = {}
+	self._visited = {}
+
+	for _, name in ipairs(PART_NAMES) do
+		self.parts[name] = { Name = name, CF = CFrame.new() }
+	end
+	self.root = self.parts.HumanoidRootPart
+
+	for _, def in ipairs(R6_JOINTS) do
+		local joint = self:AddJoint(def[1], self.parts[def[2]], self.parts[def[3]], def[4], def[5])
+		joint.RestC0 = def[4]
+		joint.RestC1 = def[5]
+		self.named[def[1]] = joint
+	end
+	return self
+end
+
+function Skeleton:GetPart(name)
+	return self.parts[name]
+end
+
+function Skeleton:GetJoint(name)
+	return self.named[name]
+end
+
+-- extra parts (hat bindings, slots) are not registered by name
+function Skeleton:AddPart(name)
+	return { Name = name, CF = CFrame.new() }
+end
+
+function Skeleton:AddJoint(name, part0, part1, c0, c1)
+	local joint = { Name = name, Part0 = part0, Part1 = part1, C0 = c0, C1 = c1 }
+	self.joints[#self.joints + 1] = joint
+	self._dirty = true
+	return joint
+end
+
+function Skeleton:RemoveJoint(joint)
+	for i = #self.joints, 1, -1 do
+		if self.joints[i] == joint then
+			table.remove(self.joints, i)
+			self._dirty = true
+			return
+		end
+	end
+end
+
+function Skeleton:RemovePart(part)
+	for i = #self.joints, 1, -1 do
+		local j = self.joints[i]
+		if j.Part0 == part or j.Part1 == part then
+			table.remove(self.joints, i)
+			self._dirty = true
+		end
+	end
+end
+
+-- re-parent a joint (used when a slot is attached to a different limb)
+function Skeleton:SetJointPart1(joint, part)
+	joint.Part1 = part
+	self._dirty = true
+end
+
+function Skeleton:SetRoot(cf)
+	self.root.CF = cf
+end
+
+-- every body joint back to its rest pose
+function Skeleton:ResetPose()
+	for _, joint in pairs(self.named) do
+		joint.C0 = joint.RestC0
+		joint.C1 = joint.RestC1
+	end
+end
+
+function Skeleton:_rebuild()
+	local adj = {}
+	for _, j in ipairs(self.joints) do
+		local a = adj[j.Part0]
+		if not a then
+			a = {}
+			adj[j.Part0] = a
+		end
+		a[#a + 1] = { joint = j, child = j.Part1, forward = true }
+		local b = adj[j.Part1]
+		if not b then
+			b = {}
+			adj[j.Part1] = b
+		end
+		b[#b + 1] = { joint = j, child = j.Part0, forward = false }
+	end
+	self._adj = adj
+	self._dirty = false
+end
+
+-- forward kinematics from the root through every joint
+function Skeleton:Refresh()
+	if self._dirty then
+		self:_rebuild()
+	end
+	local stack = self._stack
+	local visited = self._visited
+	table.clear(visited)
+	local n = 1
+	stack[1] = self.root
+	visited[self.root] = true
+	while n > 0 do
+		local part = stack[n]
+		stack[n] = nil
+		n = n - 1
+		local edges = self._adj[part]
+		if edges then
+			local pcf = part.CF
+			for i = 1, #edges do
+				local edge = edges[i]
+				local child = edge.child
+				if not visited[child] then
+					visited[child] = true
+					local j = edge.joint
+					if edge.forward then
+						child.CF = pcf * j.C0 * j.C1:Inverse()
+					else
+						child.CF = pcf * j.C1 * j.C0:Inverse()
+					end
+					n = n + 1
+					stack[n] = child
+				end
+			end
+		end
+	end
+end
+
+return Skeleton
 end
 
 return __require("main")
